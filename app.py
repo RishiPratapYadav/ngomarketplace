@@ -1,5 +1,5 @@
 import streamlit as st
-import sqlite3
+import psycopg2
 import pandas as pd
 import datetime
 import random
@@ -63,11 +63,11 @@ class NGOAgentPipeline:
         try:
             cursor.execute('''
                 INSERT INTO ngos (name, category, subcategory, country, description, website, contact, verification_status, trust_score, last_updated)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ''', (name, category, subcategory, country, desc, web, email, status, final_score, timestamp))
             conn.commit()
             return {"success": True, "name": name, "score": final_score, "subcategory": subcategory}
-        except sqlite3.IntegrityError:
+        except psycopg2.IntegrityError:
             return {"success": False, "msg": "Duplicate entity found."}
         finally:
             conn.close()
