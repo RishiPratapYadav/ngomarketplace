@@ -1,13 +1,16 @@
 import os
 import datetime
 import psycopg2
+from dotenv import load_dotenv
+
+load_dotenv()
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     os.getenv("SUPABASE_DB_URL", "postgresql://postgres:postgres@localhost:5432/ngomarketplace")
 )
 
-
+ 
 def get_connection():
     # Supabase provides a standard PostgreSQL URL that works with psycopg2.
     # If using Supabase, set DATABASE_URL or SUPABASE_DB_URL in your environment.
