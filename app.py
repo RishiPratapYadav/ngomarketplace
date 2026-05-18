@@ -4,73 +4,7 @@ import pandas as pd
 import datetime
 import random
 import re
-
-# =====================================================================
-# 1. DATABASE & INITIALIZATION LAYER
-# =====================================================================
-def init_db():
-    conn = sqlite3.connect('ngo_marketplace.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS ngos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE,
-            category TEXT,
-            subcategory TEXT,
-            country TEXT,
-            description TEXT,
-            website TEXT,
-            contact TEXT,
-            verification_status TEXT,
-            trust_score REAL,
-            last_updated TEXT
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS interactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ngo_id INTEGER,
-            user_type TEXT,
-            action_type TEXT,
-            details TEXT,
-            timestamp TEXT
-        )
-    ''')
-    cursor.execute("PRAGMA table_info(ngos)")
-    existing_columns = [row[1] for row in cursor.fetchall()]
-    if 'subcategory' not in existing_columns:
-        cursor.execute('ALTER TABLE ngos ADD COLUMN subcategory TEXT')
-    conn.commit()
-    conn.close()
-
-def seed_initial_data():
-    conn = sqlite3.connect('ngo_marketplace.db')
-    cursor = conn.cursor()
-    
-    mock_ngos = [
-        ("Feeding America", "Food Supply", "Meals Distribution", "USA", "A massive network of food banks securing and distributing meals to families nationwide.", "https://www.feedingamerica.org", "info@feedingamerica.org", "Verified", 9.5),
-        ("Akshaya Patra Foundation", "Food Supply", "Nutrition Programs", "India", "Runs the world's largest NGO-led midday meal programme for school children.", "https://www.akshayapatra.org", "infotech@akshayapatra.org", "Verified", 9.8),
-        ("No Kid Hungry", "Food Supply", "Food Security", "USA", "Working to end child hunger in America by ensuring all children get healthy food daily.", "https://www.nokidhungry.org", "info@nokidhungry.org", "Verified", 8.9),
-        ("Pratham Education Foundation", "Education & Scholarships", "Learning Centers", "India", "Focuses on high-quality, low-cost, and replicable interventions to address gaps in education.", "https://www.pratham.org", "info@pratham.org", "Verified", 9.2),
-        ("Scholarship America", "Education & Scholarships", "Scholarships", "USA", "Helps students break down financial barriers, gain access to college, and succeed.", "https://scholarshipamerica.org", "support@scholarshipamerica.org", "Verified", 9.0),
-        ("Vidya Helpline", "Education & Scholarships", "Career Guidance", "India", "Provides critical career guidance and academic scholarship tracking to rural students.", "http://www.vidyahelpline.org", "support@vidyahelpline.org", "Pending Review", 6.5),
-        ("MedicAid Collective", "Medical Support & Health", "Mobile Clinics", "India", "Deploys mobile clinics to underserved communities and delivers preventive health services.", "https://www.medicaidcollective.org", "contact@medicaidcollective.org", "Verified", 9.1),
-        ("Warm Threads", "Clothing & Shelter", "Clothing Drives", "USA", "Organizes clothing donation events and shelter kit distribution for families in need.", "https://www.warmthreads.org", "help@warmthreads.org", "Verified", 8.6),
-        ("Green Earth Initiative", "Environment & Tree Planting", "Reforestation", "India", "Plants urban trees and restores degraded land through community-led greening programs.", "https://www.greenearthinitiative.org", "info@greenearthinitiative.org", "Verified", 8.3),
-        ("Temple Trust Network", "Community & Culture", "Temple Support", "India", "Supports temple restoration, community outreach, and local welfare programs.", "https://www.templetrustnetwork.org", "support@templetrustnetwork.org", "Pending Review", 7.2)
-    ]
-    
-    for ngo in mock_ngos:
-        try:
-            cursor.execute('''
-                INSERT INTO ngos (name, category, subcategory, country, description, website, contact, verification_status, trust_score, last_updated)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (*ngo, datetime.datetime.now().strftime("%Y-%m-%d %H:%M")))
-        except sqlite3.IntegrityError:
-            pass
-            
-    conn.commit()
-    conn.close()
+from db import init_db, seed_initial_data, log_interaction, get_connection
 
 # =====================================================================
 # 2. AI AGENT SIMULATION PIPELINE
@@ -124,7 +58,7 @@ class NGOAgentPipeline:
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
         # Database Commit
-        conn = sqlite3.connect('ngo_marketplace.db')
+        conn = get_connection()
         cursor = conn.cursor()
         try:
             cursor.execute('''
@@ -156,15 +90,57 @@ SUBCATEGORY_OPTIONS = {
     "Community & Culture": ["Temple Support", "Cultural Heritage", "Community Centers"]
 }
 
-def log_interaction(ngo_id, user_type, action, details):
-    conn = sqlite3.connect('ngo_marketplace.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO interactions (ngo_id, user_type, action_type, details, timestamp)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (ngo_id, user_type, action, details, datetime.datetime.now().strftime("%Y-%m-%d %H:%M")))
-    conn.commit()
-    conn.close()
+def update_filters(category=None, subcategory=None, country=None, search=None, min_trust=None):
+    if category is not None:
+        st.session_state.sel_category = category
+        st.session_state.sel_subcategory = "All Subcategories"
+    if subcategory is not None:
+        st.session_state.sel_subcategory = subcategory
+    if country is not None:
+        st.session_state.sel_country = country
+    if search is not None:
+        st.session_state.search_query = search
+    if min_trust is not None:
+        st.session_state.min_trust = min_trust
+
+
+def create_search_assistant(prompt):
+    prompt_lower = prompt.lower()
+    response = "I found relevant NGOs across the marketplace. Refine further by location, service type, or trust level."
+    if any(term in prompt_lower for term in ["medical", "health", "clinic", "hospital"]):
+        update_filters(category="Medical Support & Health", search="", min_trust=7.0)
+        response = "Showing Medical Support & Health organizations now. You can also ask for 'mobile clinics in India' or 'urgent care'."
+    elif any(term in prompt_lower for term in ["cloth", "clothing", "winter", "shelter"]):
+        update_filters(category="Clothing & Shelter", search="", min_trust=6.0)
+        response = "Filtered to Clothing & Shelter NGOs. Try asking for 'clothing drives in USA' or 'shelter support'."
+    elif any(term in prompt_lower for term in ["plant", "tree", "green", "environment"]):
+        update_filters(category="Environment & Tree Planting", search="", min_trust=6.5)
+        response = "Presenting Environment & Tree Planting causes. You can also narrow to 'urban greening' or 'reforestation'."
+    elif any(term in prompt_lower for term in ["temple", "culture", "community"]):
+        update_filters(category="Community & Culture", search="", min_trust=6.0)
+        response = "Showing Community & Culture initiatives. Try 'temple support' or 'heritage preservation'."
+    elif any(term in prompt_lower for term in ["education", "school", "scholarship"]):
+        update_filters(category="Education & Scholarships", search="", min_trust=7.5)
+        response = "Filtered to Education & Scholarships NGOs. You can refine with 'career guidance' or 'student scholarships'."
+    elif any(term in prompt_lower for term in ["food", "meal", "hunger", "nutrition"]):
+        update_filters(category="Food Supply", search="", min_trust=7.0)
+        response = "Showing Food Supply partners. Ask for 'meal distribution' or 'school lunches' to narrow it further."
+    elif "india" in prompt_lower:
+        update_filters(country="India", search="")
+        response = "Filtered results to India. You can also ask for a category like 'health' or 'education'."
+    elif "usa" in prompt_lower or "america" in prompt_lower:
+        update_filters(country="USA", search="")
+        response = "Filtered results to the USA. Ask for more specific services like 'clothing' or 'medical'."
+    elif "high trust" in prompt_lower or "verified" in prompt_lower:
+        update_filters(min_trust=8.5)
+        response = "Showing only highly verified NGOs with strong trust ratings."
+    elif "low trust" in prompt_lower or "pending" in prompt_lower:
+        update_filters(min_trust=0.0)
+        response = "Showing all available NGOs, including pending reviews."
+    else:
+        update_filters(search=prompt)
+    return response
+
 
 # =====================================================================
 # 3. MODERN FRONTEND UI (STREAMLIT)
@@ -178,56 +154,114 @@ def main():
     # Custom Clean UI injection using CSS
     st.markdown("""
         <style>
-            .main { background-color: #fcfcfc; }
-            .stTabs [data-baseweb="tab-list"] { gap: 12px; }
+            .main { background-color: #f5f7fb; }
+            .stTabs [data-baseweb="tab-list"] { gap: 14px; }
             .stTabs [data-baseweb="tab"] {
-                background-color: #f0f2f6;
-                border-radius: 8px 8px 0px 0px;
-                padding: 10px 24px;
-                font-weight: 600;
-                color: #495057;
+                background-color: #eef2fb;
+                border-radius: 12px 12px 0 0;
+                padding: 12px 24px;
+                font-weight: 700;
+                color: #303245;
+                transition: all 0.2s ease;
             }
             .stTabs [data-baseweb="tab"][aria-selected="true"] {
-                background-color: #0d6efd;
+                background-color: #4f6ef7;
                 color: white !important;
+                box-shadow: 0 8px 22px rgba(79,110,247,0.16);
             }
-            div[data-testid="stBlock"] {
-                background-color: white;
-                padding: 20px;
-                border-radius: 12px;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.04);
-                margin-bottom: 15px;
-                border: 1px solid #f0f0f0;
+            .hero-card, .category-card, .assistant-box, .stat-card {
+                border-radius: 18px;
+                padding: 22px;
+                background: white;
+                box-shadow: 0 20px 50px rgba(15, 23, 42, 0.06);
+                border: 1px solid rgba(226,232,240,0.7);
             }
+            .category-card {
+                min-height: 110px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-weight: 700;
+                color: #27374d;
+                transition: transform 0.2s ease, background 0.2s ease;
+                cursor: pointer;
+            }
+            .category-card:hover {
+                transform: translateY(-3px);
+                background: #f8fbff;
+                border-color: #dbe4ff;
+            }
+            .assistant-box {
+                background: linear-gradient(180deg, rgba(247,250,255,0.96) 0%, rgba(255,255,255,0.98) 100%);
+            }
+            .stat-card h3 { margin: 0; color: #101828; font-size: 1.1rem; }
+            .stat-card span { display: block; margin-top: 8px; color: #475569; font-size: 1.8rem; font-weight: 800; }
             .trust-high { color: #198754; font-weight: bold; font-size: 1.1rem; }
             .trust-mid { color: #ffc107; font-weight: bold; font-size: 1.1rem; }
             .trust-low { color: #dc3545; font-weight: bold; font-size: 1.1rem; }
+            .assistant-box p { margin-bottom: 10px; }
         </style>
     """, unsafe_allow_html=True)
 
     # Clean Header Hero Section
     st.title("🤝 CivicLink")
     st.markdown("##### *The Autonomous Verification Marketplace Matching Donors & Aid Seekers with Trusted Non-Profits.*")
-    
-    # Unified Global Filters Row
+
+    if "sel_country" not in st.session_state:
+        st.session_state.sel_country = "All Countries"
+    if "sel_category" not in st.session_state:
+        st.session_state.sel_category = "All Categories"
+    if "sel_subcategory" not in st.session_state:
+        st.session_state.sel_subcategory = "All Subcategories"
+    if "min_trust" not in st.session_state:
+        st.session_state.min_trust = 0.0
+    if "search_query" not in st.session_state:
+        st.session_state.search_query = ""
+    if "assistant_history" not in st.session_state:
+        st.session_state.assistant_history = []
+
+    # Hero metrics and featured categories
+    conn = get_connection()
+    top_metrics = pd.read_sql_query(
+        "SELECT COUNT(*) AS total, SUM(CASE WHEN verification_status = 'Verified' THEN 1 ELSE 0 END) AS verified, COUNT(DISTINCT country) AS countries FROM ngos",
+        conn
+    ).iloc[0]
+    conn.close()
+
+    hero_col1, hero_col2, hero_col3 = st.columns(3)
+    with hero_col1:
+        st.markdown("<div class='stat-card'><h3>NGO Partners</h3><span>{}</span></div>".format(int(top_metrics['total'])), unsafe_allow_html=True)
+    with hero_col2:
+        st.markdown("<div class='stat-card'><h3>Verified Listings</h3><span>{}</span></div>".format(int(top_metrics['verified'])), unsafe_allow_html=True)
+    with hero_col3:
+        st.markdown("<div class='stat-card'><h3>Countries Served</h3><span>{}</span></div>".format(int(top_metrics['countries'])), unsafe_allow_html=True)
+
+    st.markdown("### 🚀 Explore Trending Sectors")
+    for row_idx in range(0, len(MAIN_CATEGORIES), 3):
+        row_cols = st.columns(3)
+        for col, category in zip(row_cols, MAIN_CATEGORIES[row_idx:row_idx+3]):
+            if col.button(category, key=f"quick_{category}", on_click=update_filters, kwargs={"category": category}):
+                pass
+            col.markdown(f"<div class='category-card'>{category}</div>", unsafe_allow_html=True)
+
     st.markdown("### 🔍 Filter Ecosystem")
     f_col1, f_col2, f_col3, f_col4 = st.columns([2, 2, 2, 2])
     with f_col1:
-        sel_country = st.selectbox("🌐 Country", ["All Countries", "USA", "India"])
+        sel_country = st.selectbox("🌐 Country", ["All Countries", "USA", "India"], key="sel_country")
     with f_col2:
-        sel_category = st.selectbox("📁 Main Category", ["All Categories"] + MAIN_CATEGORIES)
+        sel_category = st.selectbox("📁 Main Category", ["All Categories"] + MAIN_CATEGORIES, key="sel_category", on_change=update_filters, kwargs={"subcategory": "All Subcategories"})
     with f_col3:
         subcategory_options = ["All Subcategories"]
-        if sel_category == "All Categories":
+        if st.session_state.sel_category == "All Categories":
             all_subcats = sorted({sub for sublist in SUBCATEGORY_OPTIONS.values() for sub in sublist})
             subcategory_options.extend(all_subcats)
         else:
-            subcategory_options.extend(SUBCATEGORY_OPTIONS.get(sel_category, []))
-        sel_subcategory = st.selectbox("🧭 Subcategory", subcategory_options)
+            subcategory_options.extend(SUBCATEGORY_OPTIONS.get(st.session_state.sel_category, []))
+        sel_subcategory = st.selectbox("🧭 Subcategory", subcategory_options, key="sel_subcategory")
     with f_col4:
-        min_trust = st.slider("🛡️ Minimum Trust Score Threshold", 0.0, 10.0, 0.0, step=0.5)
+        min_trust = st.slider("🛡️ Minimum Trust Score Threshold", 0.0, 10.0, st.session_state.min_trust, step=0.5, key="min_trust")
 
-    search_query = st.text_input("🔎 Search NGOs, services or keywords", value="", help="Type a keyword to find matching organizations quickly.")
+    search_query = st.text_input("🔎 Search NGOs, services or keywords", value=st.session_state.search_query, key="search_query", help="Type a keyword to find matching organizations quickly.")
 
     st.write("")
 
@@ -239,7 +273,7 @@ def main():
     # -----------------------------------------------------------------
     with tab1:
         # DB Query Processing
-        conn = sqlite3.connect('ngo_marketplace.db')
+        conn = get_connection()
         query = "SELECT * FROM ngos WHERE trust_score >= ?"
         params = [min_trust]
         
@@ -260,28 +294,45 @@ def main():
         df = pd.read_sql_query(query, conn, params=params)
         conn.close()
 
-        if df.empty:
-            st.warning("No verified or pending NGOs match your criteria. Head to the 'Trigger AI Scraper Engine' tab to find more entities automatically.")
-        else:
-            for index, row in df.iterrows():
-                # Clean, Card-Style Layout Container
-                with st.container():
-                    left_col, right_col = st.columns([3, 1])
-                    
-                    with left_col:
-                        st.markdown(f"### {row['name']} <span style='font-size:1rem; color:grey;'>({row['country']})</span>", unsafe_allow_html=True)
-                        st.caption(f"**Category:** {row['category']} > {row['subcategory']}  |  **Last Verified Check:** {row['last_updated']}")
-                        st.write(row['description'])
-                        st.markdown(f"🔗 [Visit Official Website]({row['website']}) &nbsp;&nbsp;•&nbsp;&nbsp; ✉️ Contact Desk: `{row['contact']}`")
-                    
-                    with right_col:
-                        score = row['trust_score']
-                        if score >= 8.5:
-                            st.markdown(f"<p class='trust-high'>🟢 Trust Rank: {score}/10<br><span style='font-size:0.8rem; color:grey;'>High Verification Integrity</span></p>", unsafe_allow_html=True)
-                        elif score >= 7.0:
-                            st.markdown(f"<p class='trust-mid'>🟡 Trust Rank: {score}/10<br><span style='font-size:0.8rem; color:grey;'>Moderate Integrity Status</span></p>", unsafe_allow_html=True)
-                        else:
-                            st.markdown(f"<p class='trust-low'>🔴 Trust Rank: {score}/10<br><span style='font-size:0.8rem; color:grey;'>Incomplete/Pending Audits</span></p>", unsafe_allow_html=True)
+        chat_col, result_col = st.columns([1.2, 2.8])
+        with chat_col:
+            st.markdown("<div class='assistant-box'><h3>🧠 Search Assistant</h3><p>Ask CivicLink to narrow your search or choose a quick prompt.</p></div>", unsafe_allow_html=True)
+            for msg in st.session_state.assistant_history:
+                st.chat_message(msg['role']).write(msg['content'])
+            assistant_input = st.chat_input("How can I help you find the right NGO?")
+            if assistant_input:
+                st.session_state.assistant_history.append({"role": "user", "content": assistant_input})
+                answer = create_search_assistant(assistant_input)
+                st.session_state.assistant_history.append({"role": "assistant", "content": answer})
+
+            st.markdown("**Quick prompts**")
+            st.button("Find medical partners", on_click=update_filters, kwargs={"category": "Medical Support & Health", "search": "", "min_trust": 7.0})
+            st.button("Find clothing & shelter", on_click=update_filters, kwargs={"category": "Clothing & Shelter", "search": "", "min_trust": 6.0})
+            st.button("Show verified NGOs", on_click=update_filters, kwargs={"min_trust": 8.5})
+
+        with result_col:
+            if df.empty:
+                st.warning("No verified or pending NGOs match your criteria. Head to the 'Trigger AI Scraper Engine' tab to find more entities automatically.")
+            else:
+                for index, row in df.iterrows():
+                    # Clean, Card-Style Layout Container
+                    with st.container():
+                        left_col, right_col = st.columns([3, 1])
+                        
+                        with left_col:
+                            st.markdown(f"### {row['name']} <span style='font-size:1rem; color:grey;'>({row['country']})</span>", unsafe_allow_html=True)
+                            st.caption(f"**Category:** {row['category']} > {row['subcategory']}  |  **Last Verified Check:** {row['last_updated']}")
+                            st.write(row['description'])
+                            st.markdown(f"🔗 [Visit Official Website]({row['website']}) &nbsp;&nbsp;•&nbsp;&nbsp; ✉️ Contact Desk: `{row['contact']}`")
+                        
+                        with right_col:
+                            score = row['trust_score']
+                            if score >= 8.5:
+                                st.markdown(f"<p class='trust-high'>🟢 Trust Rank: {score}/10<br><span style='font-size:0.8rem; color:grey;'>High Verification Integrity</span></p>", unsafe_allow_html=True)
+                            elif score >= 7.0:
+                                st.markdown(f"<p class='trust-mid'>🟡 Trust Rank: {score}/10<br><span style='font-size:0.8rem; color:grey;'>Moderate Integrity Status</span></p>", unsafe_allow_html=True)
+                            else:
+                                st.markdown(f"<p class='trust-low'>🔴 Trust Rank: {score}/10<br><span style='font-size:0.8rem; color:grey;'>Incomplete/Pending Audits</span></p>", unsafe_allow_html=True)
 
                     # Seamless Inline Accordion Action Panel
                     with st.expander("🤝 Connect / Transact with this Organization"):
@@ -331,7 +382,7 @@ def main():
         st.subheader("📊 Immutable Backend Logging")
         st.write("Real-time telemetry tables showing data points parsed by our multi-layered framework.")
         
-        conn = sqlite3.connect('ngo_marketplace.db')
+        conn = get_connection()
         all_ngos = pd.read_sql_query("SELECT id, name, category, subcategory, country, trust_score, verification_status, last_updated FROM ngos ORDER BY trust_score DESC", conn)
         all_interactions = pd.read_sql_query("SELECT * FROM interactions ORDER BY id DESC", conn)
         conn.close()
