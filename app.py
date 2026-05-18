@@ -150,7 +150,7 @@ def main():
             .trust-mid { color: #ffc107; font-weight: bold; font-size: 1.1rem; }
             .trust-low { color: #dc3545; font-weight: bold; font-size: 1.1rem; }
         </style>
-    """, unsafe_allowed_html=True)
+    """, unsafe_allow_html=True)
 
     # Clean Header Hero Section
     st.title("🤝 CivicLink")
@@ -199,7 +199,7 @@ def main():
                     left_col, right_col = st.columns([3, 1])
                     
                     with left_col:
-                        st.markdown(f"### {row['name']} <span style='font-size:1rem; color:grey;'>({row['country']})</span>", unsafe_allowed_html=True)
+                        st.markdown(f"### {row['name']} <span style='font-size:1rem; color:grey;'>({row['country']})</span>", unsafe_allow_html=True)
                         st.caption(f"**Category:** {row['category']}  |  **Last Verified Check:** {row['last_updated']}")
                         st.write(row['description'])
                         st.markdown(f"🔗 [Visit Official Website]({row['website']}) &nbsp;&nbsp;•&nbsp;&nbsp; ✉️ Contact Desk: `{row['contact']}`")
@@ -207,11 +207,11 @@ def main():
                     with right_col:
                         score = row['trust_score']
                         if score >= 8.5:
-                            st.markdown(f"<p class='trust-high'>🟢 Trust Rank: {score}/10<br><span style='font-size:0.8rem; color:grey;'>High Verification Integrity</span></p>", unsafe_allowed_html=True)
+                            st.markdown(f"<p class='trust-high'>🟢 Trust Rank: {score}/10<br><span style='font-size:0.8rem; color:grey;'>High Verification Integrity</span></p>", unsafe_allow_html=True)
                         elif score >= 7.0:
-                            st.markdown(f"<p class='trust-mid'>🟡 Trust Rank: {score}/10<br><span style='font-size:0.8rem; color:grey;'>Moderate Integrity Status</span></p>", unsafe_allowed_html=True)
+                            st.markdown(f"<p class='trust-mid'>🟡 Trust Rank: {score}/10<br><span style='font-size:0.8rem; color:grey;'>Moderate Integrity Status</span></p>", unsafe_allow_html=True)
                         else:
-                            st.markdown(f"<p class='trust-low'>🔴 Trust Rank: {score}/10<br><span style='font-size:0.8rem; color:grey;'>Incomplete/Pending Audits</span></p>", unsafe_allowed_html=True)
+                            st.markdown(f"<p class='trust-low'>🔴 Trust Rank: {score}/10<br><span style='font-size:0.8rem; color:grey;'>Incomplete/Pending Audits</span></p>", unsafe_allow_html=True)
 
                     # Seamless Inline Accordion Action Panel
                     with st.expander("🤝 Connect / Transact with this Organization"):
