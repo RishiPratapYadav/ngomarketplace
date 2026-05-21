@@ -154,8 +154,8 @@ def create_search_assistant(prompt):
 def main():
     # Setup page properties
     st.set_page_config(page_title="CivicLink Hub", layout="wide", page_icon="🤝")
-    init_db()
-    seed_initial_data()
+    #init_db()
+    #seed_initial_data()
 
     # Custom Clean UI injection using CSS
     st.markdown("""
