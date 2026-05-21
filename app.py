@@ -1,10 +1,18 @@
 import streamlit as st
-import psycopg2
 import pandas as pd
 import datetime
 import random
 import re
-from db import init_db, seed_initial_data, log_interaction, get_connection
+from db import (
+    init_db,
+    seed_initial_data,
+    log_interaction,
+    fetch_metrics,
+    fetch_ngos,
+    fetch_all_ngos,
+    fetch_all_interactions,
+    insert_ngo,
+)
 
 # =====================================================================
 # 2. AI AGENT SIMULATION PIPELINE
@@ -57,20 +65,18 @@ class NGOAgentPipeline:
         status = "Verified" if final_score >= 7.5 else "Pending Review"
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
-        # Database Commit
-        conn = get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute('''
-                INSERT INTO ngos (name, category, subcategory, country, description, website, contact, verification_status, trust_score, last_updated)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ''', (name, category, subcategory, country, desc, web, email, status, final_score, timestamp))
-            conn.commit()
-            return {"success": True, "name": name, "score": final_score, "subcategory": subcategory}
-        except psycopg2.IntegrityError:
-            return {"success": False, "msg": "Duplicate entity found."}
-        finally:
-            conn.close()
+        return insert_ngo(
+            name,
+            category,
+            subcategory,
+            country,
+            desc,
+            web,
+            email,
+            status,
+            final_score,
+            timestamp,
+        )
 
 MAIN_CATEGORIES = [
     "Food Supply",
@@ -221,12 +227,7 @@ def main():
         st.session_state.assistant_history = []
 
     # Hero metrics and featured categories
-    conn = get_connection()
-    top_metrics = pd.read_sql_query(
-        "SELECT COUNT(*) AS total, SUM(CASE WHEN verification_status = 'Verified' THEN 1 ELSE 0 END) AS verified, COUNT(DISTINCT country) AS countries FROM ngos",
-        conn
-    ).iloc[0]
-    conn.close()
+    top_metrics = fetch_metrics()
 
     hero_col1, hero_col2, hero_col3 = st.columns(3)
     with hero_col1:
@@ -273,26 +274,14 @@ def main():
     # -----------------------------------------------------------------
     with tab1:
         # DB Query Processing
-        conn = get_connection()
-        query = "SELECT * FROM ngos WHERE trust_score >= ?"
-        params = [min_trust]
-        
-        if sel_country != "All Countries":
-            query += " AND country = ?"
-            params.append(sel_country)
-        if sel_category != "All Categories":
-            query += " AND category = ?"
-            params.append(sel_category)
-        if sel_subcategory != "All Subcategories":
-            query += " AND subcategory = ?"
-            params.append(sel_subcategory)
-        if search_query:
-            query += " AND (name LIKE ? OR description LIKE ? OR category LIKE ? OR subcategory LIKE ? OR country LIKE ? )"
-            qterm = f"%{search_query}%"
-            params.extend([qterm, qterm, qterm, qterm, qterm])
-            
-        df = pd.read_sql_query(query, conn, params=params)
-        conn.close()
+        ngos = fetch_ngos(
+            category=sel_category,
+            subcategory=sel_subcategory,
+            country=sel_country,
+            search=search_query,
+            min_trust=min_trust,
+        )
+        df = pd.DataFrame(ngos)
 
         chat_col, result_col = st.columns([1.2, 2.8])
         with chat_col:
@@ -382,10 +371,8 @@ def main():
         st.subheader("📊 Immutable Backend Logging")
         st.write("Real-time telemetry tables showing data points parsed by our multi-layered framework.")
         
-        conn = get_connection()
-        all_ngos = pd.read_sql_query("SELECT id, name, category, subcategory, country, trust_score, verification_status, last_updated FROM ngos ORDER BY trust_score DESC", conn)
-        all_interactions = pd.read_sql_query("SELECT * FROM interactions ORDER BY id DESC", conn)
-        conn.close()
+        all_ngos = pd.DataFrame(fetch_all_ngos())
+        all_interactions = pd.DataFrame(fetch_all_interactions())
         
         st.markdown("#### Indexed Database Organizations")
         st.dataframe(all_ngos, width='stretch', hide_index=True)
