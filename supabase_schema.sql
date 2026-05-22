@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS users (
     email TEXT UNIQUE NOT NULL,
     password TEXT,
     provider TEXT DEFAULT 'email',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    ngo_id INTEGER REFERENCES ngos(id)
 );
 
 CREATE TABLE IF NOT EXISTS interactions (
@@ -28,5 +29,15 @@ CREATE TABLE IF NOT EXISTS interactions (
     user_type TEXT,
     action_type TEXT,
     details TEXT,
+    timestamp TEXT
+);
+
+CREATE TABLE IF NOT EXISTS requests (
+    id SERIAL PRIMARY KEY,
+    user_email TEXT,
+    ngo_id INTEGER REFERENCES ngos(id),
+    category TEXT,
+    details TEXT,
+    status TEXT DEFAULT 'Pending',
     timestamp TEXT
 );

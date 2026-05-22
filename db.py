@@ -158,12 +158,25 @@ def _create_tables_via_service_role():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
+        -- Migration: Add ngo_id to users to support NGO persona
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS ngo_id INTEGER REFERENCES ngos(id);
+
         CREATE TABLE IF NOT EXISTS interactions (
             id SERIAL PRIMARY KEY,
             ngo_id INTEGER REFERENCES ngos(id),
             user_type TEXT,
             action_type TEXT,
             details TEXT,
+            timestamp TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS requests (
+            id SERIAL PRIMARY KEY,
+            user_email TEXT,
+            ngo_id INTEGER REFERENCES ngos(id),
+            category TEXT,
+            details TEXT,
+            status TEXT DEFAULT 'Pending',
             timestamp TEXT
         );
     '''
@@ -173,12 +186,19 @@ def _create_tables_via_service_role():
 def _ensure_supabase_tables():
     if not is_supabase_enabled():
         return
-    try:
-        # Check if table exists AND has the registration_id column
-        supabase.from_("ngos").select("id, registration_id").limit(1).execute()
-    except Exception as e:
-        msg = str(e).lower()
-        if "could not find the table" in msg or "pgrst205" in msg or "pgrst204" in msg or "registration_id" in msg:
+    
+    tables_to_check = ["ngos", "users", "interactions", "requests"]
+    missing_table = False
+    
+    for table in tables_to_check:
+        try:
+            # Check if table exists
+            supabase.from_(table).select("id").limit(1).execute()
+        except Exception as e:
+            missing_table = True
+            break
+            
+    if missing_table:
             if SUPABASE_SERVICE_ROLE:
                 try:
                     _create_tables_via_service_role()
@@ -186,7 +206,6 @@ def _ensure_supabase_tables():
                 except Exception:
                     pass # Fall back to letting the app run with empty data
             print("Note: Supabase tables missing. Setup DATABASE_URL or SUPABASE_SERVICE_ROLE to auto-create.")
-        raise
 
 
 def _supabase_execute(query):
@@ -238,6 +257,17 @@ def init_db():
                         timestamp TEXT
                     )
                 ''')
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS requests (
+                        id SERIAL PRIMARY KEY,
+                        user_email TEXT,
+                        ngo_id INTEGER REFERENCES ngos(id),
+                        category TEXT,
+                        details TEXT,
+                        status TEXT DEFAULT 'Pending',
+                        timestamp TEXT
+                    )
+                ''')
         conn.close()
         return
     if is_supabase_enabled():
@@ -250,6 +280,11 @@ def register_user(email, password, provider='email'):
     if is_supabase_enabled() and provider == 'email':
         try:
             res = supabase.auth.sign_up({"email": email, "password": password})
+            # Ensure metadata record exists in public.users for NGO linking
+            try:
+                supabase.from_("users").upsert({"email": email, "provider": provider}).execute()
+            except:
+                pass
             return {"success": True, "user": res.user}
         except Exception as e:
             return {"success": False, "msg": str(e)}
@@ -292,16 +327,23 @@ def authenticate_user(email, password):
     if is_supabase_enabled():
         try:
             res = supabase.auth.sign_in_with_password({"email": email, "password": password})
-            return {"success": True, "user": res.user}
+            if res.user:
+                # Fetch additional info from our public.users table
+                response = supabase.from_("users").select("*").eq("email", email).execute()
+                if response.data:
+                    return {"success": True, "user": response.data[0]}
+                return {"success": True, "user": {"email": email}}
         except Exception as e:
             # Fallback check for manual DB users if Supabase Auth fails
             try:
                 hashed = hash_password(password)
-                response = supabase.from_("users").select("email").eq("email", email).eq("password", hashed).eq("provider", "email").execute()
+                response = supabase.from_("users").select("*").eq("email", email).eq("password", hashed).eq("provider", "email").execute()
                 if response.data:
-                    return {"success": True, "email": email}
+                    return {"success": True, "user": response.data[0]}
             except:
                 pass
+        if not use_direct_db():
+            return {"success": False, "msg": "Invalid email or password."}
 
     if not use_direct_db():
         return {"success": False, "msg": "Authentication failed; database not configured."}
@@ -310,10 +352,10 @@ def authenticate_user(email, password):
     try:
         with conn:
             with conn.cursor() as cursor:
-                cursor.execute("SELECT password FROM users WHERE email = %s AND provider = 'email'", (email,))
+                cursor.execute("SELECT id, email, password, ngo_id FROM users WHERE email = %s AND provider = 'email'", (email,))
                 row = cursor.fetchone()
-                if row and row[0] == hash_password(password):
-                    return {"success": True, "email": email}
+                if row and row[2] == hash_password(password):
+                    return {"success": True, "user": {"id": row[0], "email": row[1], "ngo_id": row[3]}}
                 return {"success": False, "msg": "Invalid email or password."}
     except Exception as e:
         return {"success": False, "msg": str(e)}
@@ -325,10 +367,11 @@ def login_with_google_simulated(email):
     """Simulate or handle Google Login entry in the DB."""
     if is_supabase_enabled():
         try:
-            res = supabase.from_("users").select("email").eq("email", email).execute()
+            res = supabase.from_("users").select("*").eq("email", email).execute()
             if not res.data:
-                supabase.from_("users").insert({"email": email, "provider": "google"}).execute()
-            return {"success": True, "email": email}
+                ins_res = supabase.from_("users").insert({"email": email, "provider": "google"}).execute()
+                return {"success": True, "user": ins_res.data[0] if ins_res.data else {"email": email}}
+            return {"success": True, "user": res.data[0]}
         except Exception as e:
             if not use_direct_db():
                 return {"success": False, "msg": str(e)}
@@ -337,13 +380,15 @@ def login_with_google_simulated(email):
     try:
         with conn:
             with conn.cursor() as cursor:
-                cursor.execute("SELECT email FROM users WHERE email = %s", (email,))
-                if not cursor.fetchone():
+                cursor.execute("SELECT id, email, ngo_id FROM users WHERE email = %s", (email,))
+                row = cursor.fetchone()
+                if not row:
                     cursor.execute(
-                        "INSERT INTO users (email, provider) VALUES (%s, %s)",
+                        "INSERT INTO users (email, provider) VALUES (%s, %s) RETURNING id, email, ngo_id",
                         (email, 'google')
                     )
-        return {"success": True, "email": email}
+                    row = cursor.fetchone()
+                return {"success": True, "user": {"id": row[0], "email": row[1], "ngo_id": row[2]}}
     except Exception as e:
         return {"success": False, "msg": str(e)}
     finally:
@@ -612,6 +657,108 @@ def log_interaction(ngo_id, user_type, action_type, details):
                 VALUES (%s, %s, %s, %s, %s)
             ''', (ngo_id, user_type, action_type, details, datetime.datetime.now().strftime("%Y-%m-%d %H:%M")))
     conn.close()
+
+
+def submit_request(user_email, category, details, ngo_id=None):
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    payload = {
+        "user_email": user_email,
+        "category": category,
+        "details": details,
+        "ngo_id": ngo_id,
+        "status": "Pending",
+        "timestamp": timestamp
+    }
+    
+    if use_direct_db():
+        conn = get_connection()
+        with conn:
+            with conn.cursor() as cursor:
+                cursor.execute('''
+                    INSERT INTO requests (user_email, category, details, ngo_id, status, timestamp)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                ''', (user_email, category, details, ngo_id, "Pending", timestamp))
+        conn.close()
+        return {"success": True}
+
+    if is_supabase_enabled():
+        try:
+            supabase.from_("requests").insert(payload).execute()
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "msg": str(e)}
+            
+    return {"success": False, "msg": "DB not configured"}
+
+
+def fetch_ngo_requests(ngo_id):
+    if is_supabase_enabled():
+        try:
+            response = supabase.from_("requests").select("*").eq("ngo_id", ngo_id).order("id", desc=True).execute()
+            return response.data or []
+        except Exception as e:
+            return []
+
+    if not use_direct_db():
+        return []
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM requests WHERE ngo_id = %s ORDER BY id DESC", (ngo_id,))
+            cols = [desc[0] for desc in cursor.description]
+            return [dict(zip(cols, record)) for record in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def update_request_status(request_id, status):
+    if use_direct_db():
+        conn = get_connection()
+        try:
+            with conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("UPDATE requests SET status = %s WHERE id = %s", (status, request_id))
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "msg": str(e)}
+        finally:
+            conn.close()
+
+    if is_supabase_enabled():
+        try:
+            supabase.from_("requests").update({"status": status}).eq("id", request_id).execute()
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "msg": str(e)}
+            
+    return {"success": False, "msg": "DB not configured"}
+
+
+def fetch_user_requests(email):
+    if is_supabase_enabled():
+        try:
+            # Join logic simplified: fetch and then map NGO names if needed
+            response = supabase.from_("requests").select("*").eq("user_email", email).order("id", desc=True).execute()
+            return response.data or []
+        except Exception as e:
+            return []
+
+    if not use_direct_db():
+        return []
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT r.*, n.name as ngo_name 
+                FROM requests r LEFT JOIN ngos n ON r.ngo_id = n.id 
+                WHERE r.user_email = %s ORDER BY r.id DESC
+            """, (email,))
+            cols = [desc[0] for desc in cursor.description]
+            return [dict(zip(cols, record)) for record in cursor.fetchall()]
+    finally:
+        conn.close()
 
 
 def fetch_ngos(category=None, subcategory=None, country=None, search=None, min_trust=0.0):

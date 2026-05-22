@@ -18,6 +18,10 @@ from db import (
     register_user,
     authenticate_user,
     login_with_google_simulated,
+    submit_request,
+    fetch_user_requests,
+    fetch_ngo_requests,
+    update_request_status,
 )
 
 # =====================================================================
@@ -292,6 +296,17 @@ SUBCATEGORY_OPTIONS = {
     "Community & Culture": ["Temple Support", "Cultural Heritage", "Community Centers"]
 }
 
+NEED_CATEGORIES = [
+    "Food & Nutrition",
+    "Clothing & Warmth",
+    "Drinking Water",
+    "Basic Sanitation/Sanity Kits",
+    "Books & Study Materials",
+    "Scholarships",
+    "Medical Help",
+    "Other Services"
+]
+
 def update_filters(category=None, subcategory=None, country=None, search=None, min_trust=None):
     if category is not None:
         st.session_state.sel_category = category
@@ -359,7 +374,9 @@ def show_login_page():
                 res = authenticate_user(l_email, l_pwd)
                 if res["success"]:
                     st.session_state.authenticated = True
-                    st.session_state.user_email = l_email
+                    user_info = res.get("user", {})
+                    st.session_state.user_email = user_info.get("email") if isinstance(user_info, dict) else l_email
+                    st.session_state.user_ngo_id = user_info.get("ngo_id") if isinstance(user_info, dict) else None
                     if "show_auth" in st.session_state:
                         st.session_state.show_auth = False
                     st.rerun()
@@ -373,6 +390,7 @@ def show_login_page():
                 # Mock logic for dev only
                 st.session_state.authenticated = True
                 st.session_state.user_email = "dev-tester@gmail.com"
+                st.session_state.user_ngo_id = None
                 st.rerun()
 
         with tab_s:
@@ -567,7 +585,7 @@ def main():
     st.write("")
 
     # Primary Navigation Tabs
-    tab1, tab2, tab3 = st.tabs(["🏛️ Marketplace", "✨ AI Scraper Engine", "📊 Transparency Registry"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🏛️ Marketplace", "🙋 Request Help", "🏢 NGO Partner Panel", "✨ AI Scraper Engine", "📊 Transparency Registry"])
 
     # -----------------------------------------------------------------
     # TAB 1: MARKETPLACE
@@ -652,13 +670,152 @@ def main():
                                 if not st.session_state.authenticated:
                                     st.session_state.show_auth = True
                                     st.rerun()
-                                log_interaction(row['id'], "Beneficiary", "Aid Request", s_need)
-                                st.success("Your structural support query has been logged securely and routed to compliance officers.")
+                                res = submit_request(st.session_state.user_email, "Direct Support", s_need, ngo_id=row['id'])
+                                if res["success"]:
+                                    st.success(f"Your request to {row['name']} has been logged securely and can be tracked in the 'Request Help' tab.")
+                                else:
+                                    st.error("Submission failed.")
 
     # -----------------------------------------------------------------
-    # TAB 2: AI SCRAPER ENGINE CONTROL PANEL
+    # TAB 2: REQUEST HELP (BENEFICIARY WORKFLOW)
     # -----------------------------------------------------------------
     with tab2:
+        if not st.session_state.authenticated:
+            st.warning("Please Login to submit or track requests.")
+            if st.button("Go to Login", key="jump_to_login"):
+                st.session_state.show_auth = True
+                st.rerun()
+        else:
+            st.subheader("🙋 Submit a Request of Need")
+            st.write("Need help? Fill out the form below. You can send this to a specific NGO or make it a general request for any matching organization to fulfill.")
+            
+            req_col1, req_col2 = st.columns([1, 1])
+            
+            with req_col1:
+                with st.form("new_request_form"):
+                    r_category = st.selectbox("What do you need help with?", NEED_CATEGORIES)
+                    
+                    # Option to target a specific NGO
+                    ngo_list = fetch_all_ngos()
+                    ngo_options = {n['id']: n['name'] for n in ngo_list}
+                    ngo_select_options = ["General Request (Any NGO)"] + list(ngo_options.values())
+                    r_ngo_name = st.selectbox("Direct request to a specific NGO?", ngo_select_options)
+                    
+                    r_details = st.text_area("Details of your requirement", placeholder="Please describe your situation and exactly what is needed...")
+                    
+                    submit_req = st.form_submit_button("Submit Request", use_container_width=True)
+                    
+                    if submit_req:
+                        if not r_details:
+                            st.error("Please provide some details.")
+                        else:
+                            target_id = None
+                            if r_ngo_name != "General Request (Any NGO)":
+                                target_id = [k for k, v in ngo_options.items() if v == r_ngo_name][0]
+                            
+                            res = submit_request(st.session_state.user_email, r_category, r_details, ngo_id=target_id)
+                            if res["success"]:
+                                st.success("Your request has been broadcasted to our partner network.")
+                                st.rerun()
+                            else:
+                                st.error("Failed to submit request.")
+
+            with req_col2:
+                st.markdown("""
+                <div class='assistant-box'>
+                    <h4>How it works</h4>
+                    <ol style='font-size: 0.85rem; color: #334155;'>
+                        <li><strong>Submit:</strong> Describe your need clearly.</li>
+                        <li><strong>Verification:</strong> Our system checks the request for safety.</li>
+                        <li><strong>Matching:</strong> NGOs matching your category are notified.</li>
+                        <li><strong>Fulfillment:</strong> An NGO representative will contact you via your registered email.</li>
+                    </ol>
+                </div>
+                """, unsafe_allow_html=True)
+
+            st.divider()
+            st.subheader("📋 Track My Requests")
+            my_requests = fetch_user_requests(st.session_state.user_email)
+            
+            if not my_requests:
+                st.info("You haven't raised any requests yet.")
+            else:
+                # Custom table display for tracking
+                for req in my_requests:
+                    status = req.get('status', 'Pending')
+                    s_color = "#f59e0b" if status == "Pending" else "#3b82f6" if status == "In Progress" else "#10b981"
+                    
+                    target_ngo = req.get('ngo_name') or "General Network"
+                    if not target_ngo and req.get('ngo_id'):
+                        # Fallback for Supabase data where join wasn't done in SQL
+                        ngo_data = next((n for n in ngo_list if n['id'] == req['ngo_id']), None)
+                        target_ngo = ngo_data['name'] if ngo_data else "Specific NGO"
+
+                    st.markdown(f"""
+                        <div style="background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 15px; margin-bottom: 10px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <span style="font-weight: 700; color: #0f172a;">{req['category']}</span>
+                                <span style="background: {s_color}20; color: {s_color}; padding: 2px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 700;">{status}</span>
+                            </div>
+                            <div style="font-size: 0.85rem; color: #64748b; margin: 5px 0;">To: {target_ngo} | Raised on: {req['timestamp']}</div>
+                            <div style="font-size: 0.9rem; color: #334155; margin-top: 8px; border-top: 1px solid #f1f5f9; padding-top: 8px;">{req['details']}</div>
+                        </div>
+                    """, unsafe_allow_html=True)
+
+    # -----------------------------------------------------------------
+    # TAB 3: NGO PARTNER PANEL (NGO WORKFLOW)
+    # -----------------------------------------------------------------
+    with tab3:
+        if not st.session_state.authenticated:
+            st.warning("Please login as an NGO partner to access this panel.")
+        elif not st.session_state.get("user_ngo_id"):
+            st.info("Your account is not currently linked to an NGO profile. To access the Partner Panel, please contact our administrator.")
+            # Developer Shortcut for testing
+            if st.session_state.user_email == "dev-tester@gmail.com" or "@" in st.session_state.user_email:
+                if st.button("Dev Mode: Link my account to 'Feeding America' (ID: 1)"):
+                    st.session_state.user_ngo_id = 1
+                    st.success("Account linked! Please refresh to view the dashboard.")
+                    st.rerun()
+        else:
+            ngo_id = st.session_state.user_ngo_id
+            all_ngos = fetch_all_ngos()
+            my_ngo = next((n for n in all_ngos if n['id'] == ngo_id), None)
+            
+            st.subheader(f"🏢 Partner Dashboard: {my_ngo['name'] if my_ngo else 'Assigned NGO'}")
+            st.write("Manage and fulfill requests assigned to your organization.")
+            
+            ngo_reqs = fetch_ngo_requests(ngo_id)
+            
+            if not ngo_reqs:
+                st.info("No active requests assigned to your organization.")
+            else:
+                for req in ngo_reqs:
+                    with st.container():
+                        col_req, col_act = st.columns([3, 1])
+                        with col_req:
+                            status = req.get('status', 'Pending')
+                            st.markdown(f"**{req['category']}** (From: {req['user_email']})")
+                            st.markdown(f"<small>Raised: {req['timestamp']} | Status: `{status}`</small>", unsafe_allow_html=True)
+                            st.write(req['details'])
+                        
+                        with col_act:
+                            new_status = st.selectbox("Update Status", ["Pending", "In Progress", "Fulfilled"], 
+                                                     index=["Pending", "In Progress", "Fulfilled"].index(status),
+                                                     key=f"status_upd_{req['id']}")
+                            if new_status != status:
+                                if st.button("Confirm Update", key=f"btn_upd_{req['id']}"):
+                                    res = update_request_status(req['id'], new_status)
+                                    if res["success"]:
+                                        st.success("Status updated!")
+                                        st.rerun()
+                                    else:
+                                        st.error("Failed to update status.")
+                        st.divider()
+
+    # -----------------------------------------------------------------
+    # TAB 4: AI SCRAPER ENGINE CONTROL PANEL
+    # -----------------------------------------------------------------
+    with tab4:
         st.subheader("✨ Intelligent NGO Discovery")
         st.write("Enter a specific NGO registration ID or URL to run a live trust audit using our verification engine.")
         
@@ -710,9 +867,9 @@ def main():
                     st.info("Agent analysis complete. No immediate critical gaps identified.")
 
     # -----------------------------------------------------------------
-    # TAB 3: TRANSPARENCY REGISTRY
+    # TAB 5: TRANSPARENCY REGISTRY
     # -----------------------------------------------------------------
-    with tab3:
+    with tab5:
         st.subheader("📊 Immutable Backend Logging")
         st.write("Real-time telemetry tables showing data points parsed by our multi-layered framework.")
         
