@@ -12,6 +12,9 @@ from db import (
     fetch_all_ngos,
     fetch_all_interactions,
     insert_ngo,
+    register_user,
+    authenticate_user,
+    login_with_google_simulated,
 )
 
 # =====================================================================
@@ -148,6 +151,59 @@ def create_search_assistant(prompt):
     return response
 
 
+def show_login_page():
+    """Display the login and signup interface."""
+    st.markdown("<div style='text-align: center; padding: 2rem 0;'><h1>🤝 CivicLink</h1><p>Secure Access to the NGO Marketplace</p></div>", unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        tab_l, tab_s = st.tabs(["Login", "Create Account"])
+        
+        with tab_l:
+            l_email = st.text_input("Email", key="l_email")
+            l_pwd = st.text_input("Password", type="password", key="l_pwd")
+            if st.button("Sign In", use_container_width=True):
+                res = authenticate_user(l_email, l_pwd)
+                if res["success"]:
+                    st.session_state.authenticated = True
+                    st.session_state.user_email = l_email
+                    if "show_auth" in st.session_state:
+                        st.session_state.show_auth = False
+                    st.rerun()
+                else:
+                    st.error(res["msg"])
+            
+            st.divider()
+            if st.button("Continue with Google 🚀", use_container_width=True, type="secondary"):
+                # Real Google OAuth requires Client IDs. 
+                # Here we simulate the successful return of a Gmail account.
+                google_email = "user@gmail.com" 
+                login_with_google_simulated(google_email)
+                st.session_state.authenticated = True
+                st.session_state.user_email = google_email
+                if "show_auth" in st.session_state:
+                    st.session_state.show_auth = False
+                st.success("Google Authentication Simulated Successfully!")
+                st.rerun()
+
+        with tab_s:
+            s_email = st.text_input("Email", key="s_email")
+            s_pwd = st.text_input("Password", type="password", key="s_pwd")
+            s_pwd_conf = st.text_input("Confirm Password", type="password", key="s_pwd_conf")
+            
+            if st.button("Register", use_container_width=True):
+                if s_pwd != s_pwd_conf:
+                    st.error("Passwords do not match.")
+                elif len(s_pwd) < 6:
+                    st.error("Password must be at least 6 characters.")
+                else:
+                    res = register_user(s_email, s_pwd)
+                    if res["success"]:
+                        st.success("Account created! Please login.")
+                    else:
+                        st.error(res["msg"])
+
+
 # =====================================================================
 # 3. MODERN FRONTEND UI (STREAMLIT)
 # =====================================================================
@@ -155,68 +211,115 @@ def main():
     # Setup page properties
     st.set_page_config(page_title="CivicLink Hub", layout="wide", page_icon="🤝")
     
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+    if "show_auth" not in st.session_state:
+        st.session_state.show_auth = False
+    
     try:
         init_db()
         seed_initial_data()
     except Exception as e:
         st.error(f"Database Initialization Error: {e}")
 
+    if st.session_state.show_auth:
+        if st.button("← Back to Marketplace"):
+            st.session_state.show_auth = False
+            st.rerun()
+        show_login_page()
+        return
+
     # Custom Clean UI injection using CSS
     st.markdown("""
         <style>
-            .main { background-color: #f5f7fb; }
-            .stTabs [data-baseweb="tab-list"] { gap: 14px; }
+            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+            
+            html, body, [class*="css"] {
+                font-family: 'Inter', sans-serif;
+            }
+
+            .main { background-color: #f8fafc; }
+            
+            /* Modern Tabs */
+            .stTabs [data-baseweb="tab-list"] { 
+                gap: 8px; 
+                background-color: #f1f5f9;
+                padding: 6px;
+                border-radius: 12px;
+            }
             .stTabs [data-baseweb="tab"] {
-                background-color: #eef2fb;
-                border-radius: 12px 12px 0 0;
-                padding: 12px 24px;
-                font-weight: 700;
-                color: #303245;
-                transition: all 0.2s ease;
+                background-color: transparent;
+                border-radius: 8px;
+                padding: 8px 16px;
+                font-weight: 600;
+                color: #64748b;
+                border: none !important;
+                transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             }
             .stTabs [data-baseweb="tab"][aria-selected="true"] {
-                background-color: #4f6ef7;
-                color: white !important;
-                box-shadow: 0 8px 22px rgba(79,110,247,0.16);
+                background-color: white;
+                color: #0f172a !important;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.05);
             }
-            .hero-card, .category-card, .assistant-box, .stat-card {
-                border-radius: 18px;
-                padding: 22px;
+
+            /* Cards and Containers */
+            .ngo-card {
+                border-radius: 16px;
+                padding: 24px;
                 background: white;
-                box-shadow: 0 20px 50px rgba(15, 23, 42, 0.06);
-                border: 1px solid rgba(226,232,240,0.7);
+                border: 1px solid #e2e8f0;
+                transition: transform 0.2s ease, box-shadow 0.2s ease;
+                margin-bottom: 20px;
             }
-            .category-card {
-                min-height: 110px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                font-weight: 700;
-                color: #27374d;
-                transition: transform 0.2s ease, background 0.2s ease;
-                cursor: pointer;
+            .ngo-card:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 12px 24px -10px rgba(0,0,0,0.08);
+                border-color: #cbd5e1;
             }
-            .category-card:hover {
-                transform: translateY(-3px);
-                background: #f8fbff;
-                border-color: #dbe4ff;
-            }
+
             .assistant-box {
-                background: linear-gradient(180deg, rgba(247,250,255,0.96) 0%, rgba(255,255,255,0.98) 100%);
+                background: rgba(255, 255, 255, 0.7);
+                backdrop-filter: blur(12px);
+                border: 1px solid rgba(255, 255, 255, 0.5);
+                border-radius: 20px;
+                padding: 24px;
+                box-shadow: 0 8px 32px rgba(31, 38, 135, 0.07);
             }
-            .stat-card h3 { margin: 0; color: #101828; font-size: 1.1rem; }
-            .stat-card span { display: block; margin-top: 8px; color: #475569; font-size: 1.8rem; font-weight: 800; }
-            .trust-high { color: #198754; font-weight: bold; font-size: 1.1rem; }
-            .trust-mid { color: #ffc107; font-weight: bold; font-size: 1.1rem; }
-            .trust-low { color: #dc3545; font-weight: bold; font-size: 1.1rem; }
-            .assistant-box p { margin-bottom: 10px; }
+            
+            .stat-card {
+                border-radius: 16px;
+                padding: 20px;
+                background: white;
+                border: 1px solid #f1f5f9;
+                text-align: center;
+            }
+            .stat-card h3 { color: #64748b; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
+            .stat-card span { color: #0f172a; font-size: 1.75rem; font-weight: 700; }
+
+            /* Accents */
+            .ai-gradient {
+                background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
+                color: white !important;
         </style>
     """, unsafe_allow_html=True)
 
     # Clean Header Hero Section
-    st.title("🤝 CivicLink")
-    st.markdown("##### *The Autonomous Verification Marketplace Matching Donors & Aid Seekers with Trusted Non-Profits.*")
-
+    head_col1, head_col2 = st.columns([0.8, 0.2])
+    with head_col1:
+        st.title("🤝 CivicLink")
+        st.markdown("<p style='color: #64748b; font-size: 1.1rem; margin-top: -15px;'>The Intelligent Verification Marketplace for Global Impact.</p>", unsafe_allow_html=True)
+    with head_col2:
+        st.write("")
+        if st.session_state.authenticated:
+            st.markdown(f"<div style='text-align: right; font-size: 0.85rem; color: #64748b; margin-bottom: 5px;'>{st.session_state.user_email}</div>", unsafe_allow_html=True)
+            if st.button("Sign Out", use_container_width=True):
+                st.session_state.authenticated = False
+                st.rerun()
+        else:
+            if st.button("Login / Sign Up", type="primary", use_container_width=True):
+                st.session_state.show_auth = True
+                st.rerun()
+            
     if "sel_country" not in st.session_state:
         st.session_state.sel_country = "All Countries"
     if "sel_category" not in st.session_state:
@@ -241,13 +344,12 @@ def main():
     with hero_col3:
         st.markdown("<div class='stat-card'><h3>Countries Served</h3><span>{}</span></div>".format(int(top_metrics['countries'])), unsafe_allow_html=True)
 
-    st.markdown("### 🚀 Explore Trending Sectors")
+    st.write("---")
+    st.markdown("#### 🧭 Explore Sectors")
     for row_idx in range(0, len(MAIN_CATEGORIES), 3):
         row_cols = st.columns(3)
         for col, category in zip(row_cols, MAIN_CATEGORIES[row_idx:row_idx+3]):
-            if col.button(category, key=f"quick_{category}", on_click=update_filters, kwargs={"category": category}):
-                pass
-            col.markdown(f"<div class='category-card'>{category}</div>", unsafe_allow_html=True)
+            col.button(category, key=f"quick_{category}", on_click=update_filters, kwargs={"category": category}, use_container_width=True)
 
     st.markdown("### 🔍 Filter Ecosystem")
     f_col1, f_col2, f_col3, f_col4 = st.columns([2, 2, 2, 2])
@@ -264,17 +366,18 @@ def main():
             subcategory_options.extend(SUBCATEGORY_OPTIONS.get(st.session_state.sel_category, []))
         sel_subcategory = st.selectbox("🧭 Subcategory", subcategory_options, key="sel_subcategory")
     with f_col4:
-        min_trust = st.slider("🛡️ Minimum Trust Score Threshold", 0.0, 10.0, st.session_state.min_trust, step=0.5, key="min_trust")
+        # Removed redundant value parameter to resolve Streamlit Session State warning
+        st.slider("🛡️ Minimum Trust Score Threshold", 0.0, 10.0, step=0.5, key="min_trust")
 
     search_query = st.text_input("🔎 Search NGOs, services or keywords", value=st.session_state.search_query, key="search_query", help="Type a keyword to find matching organizations quickly.")
 
     st.write("")
 
     # Primary Navigation Tabs
-    tab1, tab2, tab3 = st.tabs(["🏛️ Active NGO Marketplace", "🤖 Trigger AI Scraper Engine", "📊 Transparency Registry"])
+    tab1, tab2, tab3 = st.tabs(["🏛️ Marketplace", "✨ AI Scraper Engine", "📊 Transparency Registry"])
 
     # -----------------------------------------------------------------
-    # TAB 1: THE MARKETPLACE
+    # TAB 1: MARKETPLACE
     # -----------------------------------------------------------------
     with tab1:
         # DB Query Processing
@@ -283,13 +386,13 @@ def main():
             subcategory=sel_subcategory,
             country=sel_country,
             search=search_query,
-            min_trust=min_trust,
+            min_trust=st.session_state.min_trust,
         )
         df = pd.DataFrame(ngos)
 
         chat_col, result_col = st.columns([1.2, 2.8])
         with chat_col:
-            st.markdown("<div class='assistant-box'><h3>🧠 Search Assistant</h3><p>Ask CivicLink to narrow your search or choose a quick prompt.</p></div>", unsafe_allow_html=True)
+            st.markdown("<div class='assistant-box'><h3>✨ AI Assistant</h3><p style='color: #64748b; font-size: 0.9rem;'>Ask me to find specific aid or highly-trusted partners.</p></div>", unsafe_allow_html=True)
             for msg in st.session_state.assistant_history:
                 st.chat_message(msg['role']).write(msg['content'])
             assistant_input = st.chat_input("How can I help you find the right NGO?")
@@ -309,33 +412,43 @@ def main():
             else:
                 for index, row in df.iterrows():
                     # Clean, Card-Style Layout Container
-                    with st.container():
-                        left_col, right_col = st.columns([3, 1])
-                        
-                        with left_col:
-                            st.markdown(f"### {row['name']} <span style='font-size:1rem; color:grey;'>({row['country']})</span>", unsafe_allow_html=True)
-                            st.caption(f"**Category:** {row['category']} > {row['subcategory']}  |  **Last Verified Check:** {row['last_updated']}")
-                            st.write(row['description'])
-                            st.markdown(f"🔗 [Visit Official Website]({row['website']}) &nbsp;&nbsp;•&nbsp;&nbsp; ✉️ Contact Desk: `{row['contact']}`")
-                        
-                        with right_col:
-                            score = row['trust_score']
-                            if score >= 8.5:
-                                st.markdown(f"<p class='trust-high'>🟢 Trust Rank: {score}/10<br><span style='font-size:0.8rem; color:grey;'>High Verification Integrity</span></p>", unsafe_allow_html=True)
-                            elif score >= 7.0:
-                                st.markdown(f"<p class='trust-mid'>🟡 Trust Rank: {score}/10<br><span style='font-size:0.8rem; color:grey;'>Moderate Integrity Status</span></p>", unsafe_allow_html=True)
-                            else:
-                                st.markdown(f"<p class='trust-low'>🔴 Trust Rank: {score}/10<br><span style='font-size:0.8rem; color:grey;'>Incomplete/Pending Audits</span></p>", unsafe_allow_html=True)
+                    score = row['trust_score']
+                    badge_color = "#10b981" if score >= 8.5 else "#f59e0b" if score >= 7.0 else "#ef4444"
+                    
+                    st.markdown(f"""
+                        <div class="ngo-card">
+                            <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 12px;">
+                                <div>
+                                    <h3 style="margin: 0; font-size: 1.25rem; color: #0f172a;">{row['name']}</h3>
+                                    <div style="font-size: 0.85rem; color: #64748b; margin-top: 4px;">
+                                        {row['country']} • {row['category']}
+                                    </div>
+                                </div>
+                                <div style="background: {badge_color}15; color: {badge_color}; padding: 4px 12px; border-radius: 99px; font-weight: 700; font-size: 0.85rem;">
+                                    Trust Score: {score}/10
+                                </div>
+                            </div>
+                            <p style="color: #334155; font-size: 0.95rem; line-height: 1.6; margin-bottom: 16px;">{row['description']}</p>
+                            <div style="display: flex; gap: 20px; font-size: 0.85rem;">
+                                <a href="{row['website']}" style="color: #6366f1; text-decoration: none; font-weight: 600;">🔗 Website</a>
+                                <span style="color: #64748b;">✉️ {row['contact']}</span>
+                                <span style="color: #94a3b8; margin-left: auto;">Verified: {row['last_updated']}</span>
+                            </div>
+                        </div>
+                    """, unsafe_allow_html=True)
 
                     # Seamless Inline Accordion Action Panel
                     with st.expander("🤝 Connect / Transact with this Organization"):
-                        act_col1, act_col2 = st.columns(2)
+                        act_col1, act_col2 = st.columns(2, gap="large")
                         
                         with act_col1:
                             st.markdown("**Option A: Contribute Resources**")
                             c_type = st.selectbox("What will you give?", ["Financial Donation", "Volunteer Hours", "Physical Goods/Supplies"], key=f"ct_{row['id']}")
                             c_detail = st.text_input("Pledge Details / Availability notes", placeholder="e.g., Willing to pledge $100 or volunteer on weekends", key=f"cx_{row['id']}")
                             if st.button("Submit Contribution Intent", key=f"cb_{row['id']}", width='stretch'):
+                                if not st.session_state.authenticated:
+                                    st.session_state.show_auth = True
+                                    st.rerun()
                                 log_interaction(row['id'], "Contributor", c_type, c_detail)
                                 st.success(f"Successfully connected with {row['name']}! Intakes staff will contact your verified email.")
                                 
@@ -343,6 +456,9 @@ def main():
                             st.markdown("**Option B: Request Services / Aid**")
                             s_need = st.text_area("Specify what resources or scholarships you need help with", placeholder="Describe your resource requirements concisely...", key=f"sx_{row['id']}")
                             if st.button("Request Support Resources", key=f"sb_{row['id']}", width='stretch'):
+                                if not st.session_state.authenticated:
+                                    st.session_state.show_auth = True
+                                    st.rerun()
                                 log_interaction(row['id'], "Beneficiary", "Aid Request", s_need)
                                 st.success("Your structural support query has been logged securely and routed to compliance officers.")
 
@@ -360,6 +476,9 @@ def main():
             agent_country = st.selectbox("Target Geographical Boundary", ["USA", "India"])
             
         if st.button("🚀 Execute Live Discovery & Auditing Pipeline", width='stretch'):
+            if not st.session_state.authenticated:
+                st.session_state.show_auth = True
+                st.rerun()
             with st.spinner("Pipeline parsing web registers, examining active certificates, and computing trust ratings..."):
                 res = NGOAgentPipeline.run_pipeline(agent_category, agent_country)
                 if res["success"]:

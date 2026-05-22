@@ -3,6 +3,7 @@ import datetime
 from dotenv import load_dotenv
 from supabase import create_client
 import requests
+import hashlib
 
 load_dotenv()
 
@@ -36,8 +37,6 @@ def use_direct_db():
 
 def get_connection():
     if not use_direct_db():
-        if is_supabase_enabled():
-            raise RuntimeError("Supabase client is enabled; direct DB connection is not used.")
         if psycopg2 is None:
             raise RuntimeError("psycopg2 is not installed for direct database access.")
         raise RuntimeError("DATABASE_URL or SUPABASE_DB_URL must be set for direct DB access.")
@@ -75,6 +74,13 @@ def _handle_supabase_response(response, table_name=None):
             return response # Let caller handle missing table
         raise RuntimeError(f"Supabase error: {message}")
     return response
+
+
+def hash_password(password):
+    """Simple SHA256 hashing for the PostgreSQL fallback. 
+    In production, use bcrypt or Supabase Auth.
+    """
+    return hashlib.sha256(password.encode()).hexdigest()
 
 
 def _attempt_supabase_sql(sql):
@@ -139,6 +145,14 @@ def _create_tables_via_service_role():
             last_updated TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            email TEXT UNIQUE NOT NULL,
+            password TEXT,
+            provider TEXT DEFAULT 'email',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE TABLE IF NOT EXISTS interactions (
             id SERIAL PRIMARY KEY,
             ngo_id INTEGER REFERENCES ngos(id),
@@ -197,6 +211,15 @@ def init_db():
                     )
                 ''')
                 cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS users (
+                        id SERIAL PRIMARY KEY,
+                        email TEXT UNIQUE NOT NULL,
+                        password TEXT,
+                        provider TEXT DEFAULT 'email',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                cursor.execute('''
                     CREATE TABLE IF NOT EXISTS interactions (
                         id SERIAL PRIMARY KEY,
                         ngo_id INTEGER REFERENCES ngos(id),
@@ -230,6 +253,15 @@ def init_db():
                 )
             ''')
             cursor.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    id SERIAL PRIMARY KEY,
+                    email TEXT UNIQUE NOT NULL,
+                    password TEXT,
+                    provider TEXT DEFAULT 'email',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            cursor.execute('''
                 CREATE TABLE IF NOT EXISTS interactions (
                     id SERIAL PRIMARY KEY,
                     ngo_id INTEGER REFERENCES ngos(id),
@@ -240,6 +272,111 @@ def init_db():
                 )
             ''')
     conn.close()
+
+
+def register_user(email, password, provider='email'):
+    """Register a new user via Supabase Auth or PostgreSQL."""
+    if is_supabase_enabled() and provider == 'email':
+        try:
+            res = supabase.auth.sign_up({"email": email, "password": password})
+            return {"success": True, "user": res.user}
+        except Exception as e:
+            return {"success": False, "msg": str(e)}
+
+    if is_supabase_enabled():
+        try:
+            hashed = hash_password(password) if password else None
+            supabase.from_("users").insert({
+                "email": email,
+                "password": hashed,
+                "provider": provider
+            }).execute()
+            return {"success": True, "email": email}
+        except Exception as e:
+            if "unique constraint" in str(e).lower():
+                return {"success": False, "msg": "Email already registered."}
+            if not use_direct_db():
+                return {"success": False, "msg": str(e)}
+
+    conn = get_connection()
+    try:
+        with conn:
+            with conn.cursor() as cursor:
+                hashed = hash_password(password) if password else None
+                cursor.execute(
+                    "INSERT INTO users (email, password, provider) VALUES (%s, %s, %s) RETURNING id",
+                    (email, hashed, provider)
+                )
+                return {"success": True, "email": email}
+    except Exception as e:
+        if "unique constraint" in str(e).lower():
+            return {"success": False, "msg": "Email already registered."}
+        return {"success": False, "msg": str(e)}
+    finally:
+        conn.close()
+
+
+def authenticate_user(email, password):
+    """Authenticate user via Supabase Auth or PostgreSQL."""
+    if is_supabase_enabled():
+        try:
+            res = supabase.auth.sign_in_with_password({"email": email, "password": password})
+            return {"success": True, "user": res.user}
+        except Exception as e:
+            # Fallback check for manual DB users if Supabase Auth fails
+            try:
+                hashed = hash_password(password)
+                response = supabase.from_("users").select("email").eq("email", email).eq("password", hashed).eq("provider", "email").execute()
+                if response.data:
+                    return {"success": True, "email": email}
+            except:
+                pass
+
+    if not use_direct_db():
+        return {"success": False, "msg": "Authentication failed; database not configured."}
+
+    conn = get_connection()
+    try:
+        with conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT password FROM users WHERE email = %s AND provider = 'email'", (email,))
+                row = cursor.fetchone()
+                if row and row[0] == hash_password(password):
+                    return {"success": True, "email": email}
+                return {"success": False, "msg": "Invalid email or password."}
+    except Exception as e:
+        return {"success": False, "msg": str(e)}
+    finally:
+        conn.close()
+
+
+def login_with_google_simulated(email):
+    """Simulate or handle Google Login entry in the DB."""
+    if is_supabase_enabled():
+        try:
+            res = supabase.from_("users").select("email").eq("email", email).execute()
+            if not res.data:
+                supabase.from_("users").insert({"email": email, "provider": "google"}).execute()
+            return {"success": True, "email": email}
+        except Exception as e:
+            if not use_direct_db():
+                return {"success": False, "msg": str(e)}
+
+    conn = get_connection()
+    try:
+        with conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT email FROM users WHERE email = %s", (email,))
+                if not cursor.fetchone():
+                    cursor.execute(
+                        "INSERT INTO users (email, provider) VALUES (%s, %s)",
+                        (email, 'google')
+                    )
+        return {"success": True, "email": email}
+    except Exception as e:
+        return {"success": False, "msg": str(e)}
+    finally:
+        conn.close()
 
 
 def seed_initial_data():
@@ -388,6 +525,9 @@ def seed_initial_data():
         except Exception as e:
             msg = str(e).lower()
             if "could not find the table" in msg or "pgrst205" in msg:
+                return
+            # Suppress duplicate key errors to prevent console noise during frequent reruns
+            if "23505" in msg or "duplicate key" in msg:
                 return
             print(f"Seeding skipped or failed: {e}")
         return

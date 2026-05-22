@@ -13,6 +13,14 @@ CREATE TABLE IF NOT EXISTS ngos (
     last_updated TEXT
 );
 
+CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    email TEXT UNIQUE NOT NULL,
+    password TEXT,
+    provider TEXT DEFAULT 'email',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS interactions (
     id SERIAL PRIMARY KEY,
     ngo_id INTEGER REFERENCES ngos(id),
