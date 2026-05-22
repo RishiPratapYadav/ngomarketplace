@@ -66,14 +66,13 @@ def _apply_filters(rows, category=None, subcategory=None, country=None, search=N
 
 
 def _handle_supabase_response(response, table_name=None):
-    
-    if response.error:
-        message = str(response.error.message)
+    """Safely handle Supabase response objects across library versions."""
+    # Recent supabase-py versions return data directly or raise exceptions.
+    # Older versions return an object with an .error attribute.
+    if hasattr(response, 'error') and response.error:
+        message = str(response.error.get('message', response.error))
         if "Could not find the table" in message or "PGRST205" in message:
-            table_hint = f" Table '{table_name}' was not found. " if table_name else ""
-            raise RuntimeError(
-                f"Supabase table not found.{table_hint}Create the table in Supabase or set DATABASE_URL/SUPABASE_DB_URL and run init_db() to create it."
-            )
+            return response # Let caller handle missing table
         raise RuntimeError(f"Supabase error: {message}")
     return response
 
@@ -156,40 +155,18 @@ def _ensure_supabase_tables():
     if not is_supabase_enabled():
         return
     try:
-        response = supabase.from_("ngos").select("id").limit(1).execute()
-        if response.error:
-            message = str(response.error.message)
-            if "Could not find the table" in message or "PGRST205" in message:
-                # try to create tables if service role is provided
-                if SUPABASE_SERVICE_ROLE:
-                    try:
-                        _create_tables_via_service_role()
-                        return
-                    except Exception:
-                        raise RuntimeError(
-                            "Supabase client is configured, required tables were missing, and automatic creation via service role failed. "
-                            "Set DATABASE_URL or SUPABASE_DB_URL and run init_db(), or create the tables in Supabase."
-                        )
-                raise RuntimeError(
-                    "Supabase client is configured, but required tables are missing. "
-                    "Set DATABASE_URL or SUPABASE_DB_URL and run init_db(), or create the tables in Supabase."
-                )
-            raise RuntimeError(f"Supabase error: {message}")
+        # Just a check to see if the table exists
+        supabase.from_("ngos").select("id").limit(1).execute()
     except Exception as e:
-        if "Could not find the table" in str(e) or "PGRST205" in str(e):
+        msg = str(e).lower()
+        if "could not find the table" in msg or "pgrst205" in msg:
             if SUPABASE_SERVICE_ROLE:
                 try:
                     _create_tables_via_service_role()
                     return
                 except Exception:
-                    raise RuntimeError(
-                        "Supabase client is configured, required tables were missing, and automatic creation via service role failed. "
-                        "Set DATABASE_URL or SUPABASE_DB_URL and run init_db(), or create the tables in Supabase."
-                    )
-            raise RuntimeError(
-                "Supabase client is configured, but required tables are missing. "
-                "Set DATABASE_URL or SUPABASE_DB_URL and run init_db(), or create the tables in Supabase."
-            )
+                    pass # Fall back to letting the app run with empty data
+            print("Note: Supabase tables missing. Setup DATABASE_URL or SUPABASE_SERVICE_ROLE to auto-create.")
         raise
 
 
@@ -407,12 +384,12 @@ def seed_initial_data():
 
     if is_supabase_enabled():
         try:
-            response = supabase.from_("ngos").insert(initial_data, upsert=True).execute()
-            _handle_supabase_response(response, table_name="ngos")
+            supabase.from_("ngos").upsert(initial_data).execute()
         except Exception as e:
-            if "could not find the table" in str(e).lower() or "pgrst205" in str(e).lower():
+            msg = str(e).lower()
+            if "could not find the table" in msg or "pgrst205" in msg:
                 return
-            raise
+            print(f"Seeding skipped or failed: {e}")
         return
 
     conn = get_connection()
@@ -461,19 +438,12 @@ def insert_ngo(name, category, subcategory, country, description, website, conta
     if is_supabase_enabled():
         try:
             response = supabase.from_("ngos").insert(payload).execute()
-            if response.error:
-                message = str(response.error.message).lower()
-                if "duplicate key" in message:
-                    return {"success": False, "msg": "Duplicate entity found."}
-                if "could not find the table" in message or "pgrst205" in message:
-                    raise RuntimeError(
-                        "Supabase client is configured, but required tables are missing. "
-                        "Set DATABASE_URL or SUPABASE_DB_URL and run init_db(), or create the tables in Supabase."
-                    )
-                raise RuntimeError(f"Supabase insert error: {response.error.message}")
             return {"success": True, "name": name, "score": trust_score, "subcategory": subcategory}
         except Exception as e:
-            if "Could not find the table" in str(e) or "pgrst205" in str(e):
+            msg = str(e).lower()
+            if "duplicate key" in msg:
+                return {"success": False, "msg": "Duplicate entity found."}
+            if "could not find the table" in msg or "pgrst205" in msg:
                 raise RuntimeError(
                     "Supabase client is configured, but required tables are missing. "
                     "Set DATABASE_URL or SUPABASE_DB_URL and run init_db(), or create the tables in Supabase."
@@ -509,27 +479,17 @@ def log_interaction(ngo_id, user_type, action_type, details):
 
     if is_supabase_enabled():
         try:
-            response = supabase.from_("interactions").insert({
+            supabase.from_("interactions").insert({
                 "ngo_id": ngo_id,
                 "user_type": user_type,
                 "action_type": action_type,
                 "details": details,
                 "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
             }).execute()
-             # If it reaches here, the request was successful
-            return 
-        except Exception as e:
-            # This is where your custom error tracking and handling happens
-            print(e.message)
-            print("After Response 592")
-            if response.error:
-                message = str(response.error.message)
-                if "Could not find the table" in message or "PGRST205" in message:
-                    return
-                raise RuntimeError(f"Supabase interaction error: {response.error.message}")
             return
         except Exception as e:
-            if "Could not find the table" in str(e) or "PGRST205" in str(e):
+            message = str(e)
+            if "Could not find the table" in message or "PGRST205" in message:
                 return
             raise
 
@@ -544,26 +504,17 @@ def log_interaction(ngo_id, user_type, action_type, details):
 
 
 def fetch_ngos(category=None, subcategory=None, country=None, search=None, min_trust=0.0):
+    rows = []
     if is_supabase_enabled():
         try:  
             response =supabase.table("ngos").select("*").execute()
-            #response = supabase.from_("ngos").select("*").execute()
-             # If it reaches here, the request was successful
-            return response.data or []
+            rows = response.data or []
         except Exception as e:
-            # This is where your custom error tracking and handling happens
-            print(e.message)
-            print("After Response 592")
-            #if response.error:
-            #    message = str(response.error.message)
-            #    if "Could not find the table" in message or "PGRST205" in message:
-            #        return []
-            #    raise RuntimeError(f"Supabase fetch error: {message}")
-            #rows = response.data or []
-        #except Exception as e:
-         #   if "Could not find the table" in str(e) or "PGRST205" in str(e):
-         #       return []
-         #   raise
+            message = str(e)
+            if "Could not find the table" in message or "PGRST205" in message:
+                rows = []
+            else:
+                raise RuntimeError(f"Supabase fetch error: {message}")
     else:
         conn = get_connection()
         query = "SELECT * FROM ngos WHERE trust_score >= %s"
@@ -581,7 +532,6 @@ def fetch_ngos(category=None, subcategory=None, country=None, search=None, min_t
             query += " AND (name ILIKE %s OR description ILIKE %s OR category ILIKE %s OR subcategory ILIKE %s OR country ILIKE %s)"
             qterm = f"%{search}%"
             params.extend([qterm] * 5)
-        rows = []
         try:
             with conn.cursor() as cursor:
                 cursor.execute(query, params)
@@ -597,28 +547,19 @@ def fetch_all_ngos():
     if is_supabase_enabled():
         try:
             response =supabase.table("ngos").select("*").execute() #response = supabase.from_("ngos").select("*").execute()
-            # If it reaches here, the request was successful
             return response.data or []
         except Exception as e:
-            # This is where your custom error tracking and handling happens
-            print(e.message)
-            print("After Response 592")
-    
-    # Check for missing table or specific PostgREST error codes
-            message = str(e.message)
-            if "Could not find the table" in message or "PGRST205" in e.code:
+            message = str(e)
+            if "Could not find the table" in message or "PGRST205" in message:
                 return []
-        
-    # Re-raise anything else as a RuntimeError per your original code
-    raise RuntimeError(f"Supabase fetch error: {message}")
+            raise RuntimeError(f"Supabase fetch error: {message}")
+
     conn = get_connection()
-    print("After Conn 601")
     with conn.cursor() as cursor:
         cursor.execute("SELECT id, name, category, subcategory, country, trust_score, verification_status, last_updated FROM ngos ORDER BY trust_score DESC")
         cols = [desc[0] for desc in cursor.description]
         rows = [dict(zip(cols, record)) for record in cursor.fetchall()]
     conn.close()
-    print("Before return 605")
     return rows
 
 
@@ -626,22 +567,13 @@ def fetch_all_interactions():
     if is_supabase_enabled():
         try:
             response = supabase.from_("interactions").select("*").order("id", desc=True).execute()
-             # If it reaches here, the request was successful
             return response.data or []
         except Exception as e:
-            # This is where your custom error tracking and handling happens
-            print(e.message)
-            print("After Response 592")
-           # if response.error:
-            #    message = str(response.error.message)
-             #   if "Could not find the table" in message or "PGRST205" in message:
-              #      return []
-               # raise RuntimeError(f"Supabase fetch error: {message}")
-            #return response.data or []
-        #except Exception as e:
-         #   if "Could not find the table" in str(e) or "PGRST205" in str(e):
-          #      return []
-           # raise
+            message = str(e)
+            if "Could not find the table" in message or "PGRST205" in message:
+                return []
+            raise RuntimeError(f"Supabase fetch error: {message}")
+
     conn = get_connection()
     with conn.cursor() as cursor:
         cursor.execute("SELECT * FROM interactions ORDER BY id DESC")
@@ -652,9 +584,7 @@ def fetch_all_interactions():
 
 
 def fetch_metrics():
-    print("Inside fetch_metrics")
     rows = fetch_all_ngos()
-    print("After fetch_all_ngos 634")
     total = len(rows)
     verified = sum(1 for row in rows if row.get("verification_status") == "Verified")
     countries = len({row.get("country") for row in rows})

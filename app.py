@@ -154,8 +154,12 @@ def create_search_assistant(prompt):
 def main():
     # Setup page properties
     st.set_page_config(page_title="CivicLink Hub", layout="wide", page_icon="🤝")
-    #init_db()
-    #seed_initial_data()
+    
+    try:
+        init_db()
+        seed_initial_data()
+    except Exception as e:
+        st.error(f"Database Initialization Error: {e}")
 
     # Custom Clean UI injection using CSS
     st.markdown("""
