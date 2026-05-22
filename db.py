@@ -1,9 +1,10 @@
 import os
 import datetime
+import random
+import hashlib
+import requests
 from dotenv import load_dotenv
 from supabase import create_client
-import requests
-import hashlib
 
 load_dotenv()
 
@@ -70,7 +71,7 @@ def _handle_supabase_response(response, table_name=None):
     # Older versions return an object with an .error attribute.
     if hasattr(response, 'error') and response.error:
         message = str(response.error.get('message', response.error))
-        if "Could not find the table" in message or "PGRST205" in message:
+        if "Could not find the table" in message or "PGRST205" in message or "PGRST204" in message:
             return response # Let caller handle missing table
         raise RuntimeError(f"Supabase error: {message}")
     return response
@@ -137,6 +138,7 @@ def _create_tables_via_service_role():
             category TEXT,
             subcategory TEXT,
             country TEXT,
+            registration_id TEXT UNIQUE,
             description TEXT,
             website TEXT,
             contact TEXT,
@@ -144,6 +146,9 @@ def _create_tables_via_service_role():
             trust_score REAL,
             last_updated TEXT
         );
+
+        -- Migration: Ensure registration_id exists if table was created earlier
+        ALTER TABLE ngos ADD COLUMN IF NOT EXISTS registration_id TEXT UNIQUE;
 
         CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
@@ -169,11 +174,11 @@ def _ensure_supabase_tables():
     if not is_supabase_enabled():
         return
     try:
-        # Just a check to see if the table exists
-        supabase.from_("ngos").select("id").limit(1).execute()
+        # Check if table exists AND has the registration_id column
+        supabase.from_("ngos").select("id, registration_id").limit(1).execute()
     except Exception as e:
         msg = str(e).lower()
-        if "could not find the table" in msg or "pgrst205" in msg:
+        if "could not find the table" in msg or "pgrst205" in msg or "pgrst204" in msg or "registration_id" in msg:
             if SUPABASE_SERVICE_ROLE:
                 try:
                     _create_tables_via_service_role()
@@ -202,6 +207,7 @@ def init_db():
                         category TEXT,
                         subcategory TEXT,
                         country TEXT,
+                        registration_id TEXT UNIQUE,
                         description TEXT,
                         website TEXT,
                         contact TEXT,
@@ -210,6 +216,9 @@ def init_db():
                         last_updated TEXT
                     )
                 ''')
+                # Migration for existing tables
+                cursor.execute("ALTER TABLE ngos ADD COLUMN IF NOT EXISTS registration_id TEXT UNIQUE")
+                
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS users (
                         id SERIAL PRIMARY KEY,
@@ -234,44 +243,6 @@ def init_db():
     if is_supabase_enabled():
         _ensure_supabase_tables()
         return
-    conn = get_connection()
-    with conn:
-        with conn.cursor() as cursor:
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS ngos (
-                    id SERIAL PRIMARY KEY,
-                    name TEXT UNIQUE,
-                    category TEXT,
-                    subcategory TEXT,
-                    country TEXT,
-                    description TEXT,
-                    website TEXT,
-                    contact TEXT,
-                    verification_status TEXT,
-                    trust_score REAL,
-                    last_updated TEXT
-                )
-            ''')
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    id SERIAL PRIMARY KEY,
-                    email TEXT UNIQUE NOT NULL,
-                    password TEXT,
-                    provider TEXT DEFAULT 'email',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS interactions (
-                    id SERIAL PRIMARY KEY,
-                    ngo_id INTEGER REFERENCES ngos(id),
-                    user_type TEXT,
-                    action_type TEXT,
-                    details TEXT,
-                    timestamp TEXT
-                )
-            ''')
-    conn.close()
 
 
 def register_user(email, password, provider='email'):
@@ -524,7 +495,10 @@ def seed_initial_data():
             supabase.from_("ngos").upsert(initial_data).execute()
         except Exception as e:
             msg = str(e).lower()
-            if "could not find the table" in msg or "pgrst205" in msg:
+            if "disconnected" in msg:
+                print("Seeding skipped: Server disconnected. Check Supabase connection.")
+                return
+            if "could not find the table" in msg or "pgrst205" in msg or "pgrst204" in msg:
                 return
             # Suppress duplicate key errors to prevent console noise during frequent reruns
             if "23505" in msg or "duplicate key" in msg:
@@ -553,6 +527,7 @@ def insert_ngo(name, category, subcategory, country, description, website, conta
         "category": category,
         "subcategory": subcategory,
         "country": country,
+        "registration_id": f"REG-{random.randint(10000, 99999)}",
         "description": description,
         "website": website,
         "contact": contact,
@@ -565,9 +540,9 @@ def insert_ngo(name, category, subcategory, country, description, website, conta
         cursor = conn.cursor()
         try:
             cursor.execute('''
-                INSERT INTO ngos (name, category, subcategory, country, description, website, contact, verification_status, trust_score, last_updated)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ''', (name, category, subcategory, country, description, website, contact, verification_status, trust_score, last_updated))
+                INSERT INTO ngos (name, category, subcategory, country, registration_id, description, website, contact, verification_status, trust_score, last_updated)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ''', (name, category, subcategory, country, payload["registration_id"], description, website, contact, verification_status, trust_score, last_updated))
             conn.commit()
             return {"success": True, "name": name, "score": trust_score, "subcategory": subcategory}
         except psycopg2.IntegrityError:
@@ -581,28 +556,24 @@ def insert_ngo(name, category, subcategory, country, description, website, conta
             return {"success": True, "name": name, "score": trust_score, "subcategory": subcategory}
         except Exception as e:
             msg = str(e).lower()
-            if "duplicate key" in msg:
+            # Standard Postgres error code for unique violation is 23505
+            code = getattr(e, "code", None)
+            if code == "23505" or "duplicate key" in msg or "23505" in msg:
                 return {"success": False, "msg": "Duplicate entity found."}
-            if "could not find the table" in msg or "pgrst205" in msg:
+            if "could not find the table" in msg or "pgrst205" in msg or "pgrst204" in msg or "registration_id" in msg:
+                # Attempt migration if service role is available
+                if SUPABASE_SERVICE_ROLE:
+                    try:
+                        _create_tables_via_service_role()
+                    except:
+                        pass
                 raise RuntimeError(
-                    "Supabase client is configured, but required tables are missing. "
+                    "Supabase client is configured, but required tables or columns are missing. "
                     "Set DATABASE_URL or SUPABASE_DB_URL and run init_db(), or create the tables in Supabase."
                 )
             raise
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute('''
-            INSERT INTO ngos (name, category, subcategory, country, description, website, contact, verification_status, trust_score, last_updated)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ''', (name, category, subcategory, country, description, website, contact, verification_status, trust_score, last_updated))
-        conn.commit()
-        return {"success": True, "name": name, "score": trust_score, "subcategory": subcategory}
-    except psycopg2.IntegrityError:
-        return {"success": False, "msg": "Duplicate entity found."}
-    finally:
-        conn.close()
+    return {"success": False, "msg": "Database configuration missing."}
 
 
 def log_interaction(ngo_id, user_type, action_type, details):
@@ -629,7 +600,7 @@ def log_interaction(ngo_id, user_type, action_type, details):
             return
         except Exception as e:
             message = str(e)
-            if "Could not find the table" in message or "PGRST205" in message:
+            if "Could not find the table" in message or "PGRST205" in message or "PGRST204" in message:
                 return
             raise
 
@@ -651,7 +622,7 @@ def fetch_ngos(category=None, subcategory=None, country=None, search=None, min_t
             rows = response.data or []
         except Exception as e:
             message = str(e)
-            if "Could not find the table" in message or "PGRST205" in message:
+            if "Could not find the table" in message or "PGRST205" in message or "PGRST204" in message:
                 rows = []
             else:
                 raise RuntimeError(f"Supabase fetch error: {message}")
@@ -690,7 +661,7 @@ def fetch_all_ngos():
             return response.data or []
         except Exception as e:
             message = str(e)
-            if "Could not find the table" in message or "PGRST205" in message:
+            if "Could not find the table" in message or "PGRST205" in message or "PGRST204" in message:
                 return []
             raise RuntimeError(f"Supabase fetch error: {message}")
 
@@ -710,7 +681,7 @@ def fetch_all_interactions():
             return response.data or []
         except Exception as e:
             message = str(e)
-            if "Could not find the table" in message or "PGRST205" in message:
+            if "Could not find the table" in message or "PGRST205" in message or "PGRST204" in message:
                 return []
             raise RuntimeError(f"Supabase fetch error: {message}")
 

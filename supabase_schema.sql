@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS ngos (
     category TEXT,
     subcategory TEXT,
     country TEXT,
+    registration_id TEXT UNIQUE,
     description TEXT,
     website TEXT,
     contact TEXT,

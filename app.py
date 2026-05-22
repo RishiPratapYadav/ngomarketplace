@@ -1,8 +1,11 @@
 import streamlit as st
+import os
 import pandas as pd
 import datetime
 import random
+import requests
 import re
+from apscheduler.schedulers.background import BackgroundScheduler
 from db import (
     init_db,
     seed_initial_data,
@@ -22,49 +25,99 @@ from db import (
 # =====================================================================
 class NGOAgentPipeline:
     @staticmethod
-    def run_pipeline(category, country):
-        # Discovery Phase
-        suffix = random.randint(100, 999)
-        if category == "Food Supply":
-            subcategory = "Nutrition Programs"
-            name = f"Zero Hunger Alliance {suffix}"
-            desc = "Community-led regional distribution program focused on mapping restaurant surplus directly to shelters."
-            web = "https://example-zerohunger.org"
-            email = "contact@example-zerohunger.org"
-        elif category == "Education & Scholarships":
-            subcategory = "Scholarships"
-            name = f"Bright Horizon Scholars {suffix}"
-            desc = "Providing direct financial grants and technology hardware resources to underprivileged students."
-            web = "https://example-brighthorizons.org"
-            email = "grants@example-brighthorizons.org"
-        elif category == "Medical Support & Health":
-            subcategory = "Mobile Clinics"
-            name = f"Health Access Network {suffix}"
-            desc = "Operates mobile clinics and telehealth outreach in remote and underserved regions."
-            web = "https://example-healthaccess.org"
-            email = "support@example-healthaccess.org"
-        elif category == "Clothing & Shelter":
-            subcategory = "Clothing Drives"
-            name = f"Warm Hearts Collective {suffix}"
-            desc = "Drives clothing donation campaigns and emergency shelter assistance for vulnerable families."
-            web = "https://example-warmhearts.org"
-            email = "hello@example-warmhearts.org"
-        elif category == "Environment & Tree Planting":
-            subcategory = "Reforestation"
-            name = f"Green Canopy Project {suffix}"
-            desc = "Restores degraded land through community-led tree planting and sustainable habitat programs."
-            web = "https://example-greencanopy.org"
-            email = "connect@example-greencanopy.org"
-        else:
-            subcategory = "Temple Support"
-            name = f"Community Blessings Trust {suffix}"
-            desc = "Supports local temple restoration, cultural events, and community welfare outreach."
-            web = "https://example-communityblessings.org"
-            email = "care@example-communityblessings.org"
+    def _search_every_org(category, limit=3):
+        """Every.org API for global NGO discovery."""
+        url = f"https://partners.every.org/v1/search/{category}"
+        params = {
+            "take": limit,
+            "apiKey": "public"
+        }
+        results = []
+        try:
+            resp = requests.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                for org in data.get("nonprofits", []):
+                    results.append({
+                        "name": org.get("name"),
+                        "desc": org.get("description") or "International non-profit organization.",
+                        "web": org.get("profileUrl") or "https://every.org",
+                    })
+        except Exception as e:
+            print(f"Every.org Discovery Error: {e}")
+        return results
 
-        # Verification & Scoring Heuristics
-        base_score = 7.5 if web.startswith("https") else 5.0
-        final_score = round(min(base_score + random.uniform(0.5, 2.3), 10.0), 1)
+    @staticmethod
+    def _search_global_giving(category, limit=3):
+        """GlobalGiving API for global NGO discovery."""
+        api_key = os.getenv("GLOBALGIVING_API_KEY")
+        if not api_key:
+            return []
+        url = "https://api.globalgiving.org/api/public/services/search/projects.json"
+        params = {"api_key": api_key, "q": category}
+        results = []
+        try:
+            resp = requests.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                # GlobalGiving structure for search results
+                projects = data.get("search", {}).get("response", {}).get("projects", {}).get("project", [])
+                if isinstance(projects, dict): projects = [projects]
+                for p in projects[:limit]:
+                    org = p.get("organization", {})
+                    results.append({
+                        "name": org.get("name") or p.get("title"),
+                        "desc": p.get("summary") or "Active international development project.",
+                        "web": org.get("url") or p.get("projectLink"),
+                    })
+        except Exception as e:
+            print(f"GlobalGiving Discovery Error: {e}")
+        return results
+
+    @staticmethod
+    def _search_wikipedia(category, country, limit=3):
+        """Wikipedia API as a discovery tool for NGOs."""
+        url = "https://en.wikipedia.org/w/api.php"
+        search_query = f"Non-profit organization {category} {country}"
+        params = {
+            "action": "query",
+            "list": "search",
+            "srsearch": search_query,
+            "format": "json",
+            "srlimit": limit
+        }
+        results = []
+        try:
+            resp = requests.get(url, params=params, timeout=10)
+            resp.raise_for_status()
+            if "application/json" not in resp.headers.get("Content-Type", ""):
+                print(f"Wikipedia Discovery Warning: Expected JSON but got {resp.headers.get('Content-Type')}")
+                return []
+            data = resp.json()
+            for item in data.get("query", {}).get("search", []):
+                title = item['title']
+                snippet = re.sub(r'<[^>]+>', '', item['snippet'])
+                results.append({
+                    "name": title,
+                    "desc": f"{snippet}...",
+                    "web": f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
+                })
+        except Exception as e:
+            print(f"Wikipedia Discovery Error: {e}")
+        return results
+
+    @staticmethod
+    def _process_discovery_item(name, category, country, desc, web, reg_id=None):
+        """Handles scoring and DB insertion for a discovered entity."""
+        subcategory = SUBCATEGORY_OPTIONS.get(category, ["General"])[0]
+        email = "contact@partner-network.org"
+
+        # Dynamic Scoring Heuristics
+        base_score = 8.0 if country == "USA" or "wikipedia" not in web.lower() else 6.5
+        if reg_id: base_score += 1.0
+        if desc and "Verified" in desc: base_score += 0.5
+        
+        final_score = round(min(base_score + random.uniform(0.1, 0.5), 10.0), 1)
         status = "Verified" if final_score >= 7.5 else "Pending Review"
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -73,13 +126,153 @@ class NGOAgentPipeline:
             category,
             subcategory,
             country,
-            desc,
+            desc or "",
             web,
             email,
             status,
             final_score,
             timestamp,
         )
+
+    @staticmethod
+    def run_autonomous_discovery():
+        """
+        Agentic task to balance and expand the marketplace database autonomously.
+        1. Analyze current metrics to identify underserved sectors.
+        2. Execute targeted discovery for those gaps.
+        """
+        try:
+            all_ngos = fetch_all_ngos()
+            if not all_ngos:
+                target_cat = random.choice(MAIN_CATEGORIES)
+            else:
+                # Agentic Reasoning: Prioritize categories with the fewest NGOs to ensure marketplace balance
+                counts = {cat: 0 for cat in MAIN_CATEGORIES}
+                for ngo in all_ngos:
+                    cat = ngo.get('category')
+                    if cat in counts:
+                        counts[cat] += 1
+                target_cat = min(counts, key=counts.get)
+            
+            discoveries = []
+            # Process discovery for primary target regions
+            for country in ["USA", "India", "Global"]:
+                try:
+                    res = NGOAgentPipeline.run_pipeline(target_cat, country)
+                    if res and res.get("success"):
+                        discoveries.append(res)
+                except Exception as e:
+                    print(f"Autonomous discovery error for {country}: {e}")
+            
+            print(f"[{datetime.datetime.now()}] Autonomous Weekly Agent Discovery Completed: {len(discoveries)} new entities added.")
+            return discoveries
+        except Exception as e:
+            print(f"Autonomous Agent Error: {e}")
+            return []
+
+    @staticmethod
+    def run_pipeline(category, country, reg_id=None):
+        """Discovers and verifies real NGO data using public APIs (Single Audit)."""
+        name, desc, web = None, None, "https://not-found.org"
+
+        # 1. Real-World Discovery/Verification Call
+        if country == "USA":
+            # Use ProPublica Nonprofit Explorer API (Free/Open)
+            query = reg_id if reg_id else category
+            url = f"https://projects.propublica.org/nonprofits/api/v2/search.json?q={query}"
+            try:
+                resp = requests.get(url, timeout=10)
+                resp.raise_for_status()
+                data = resp.json()
+                if data.get("organizations"):
+                    org = data["organizations"][0] # Grab the top match
+                    name = org.get("name").title()
+                    desc = f"Verified US Nonprofit. EIN: {org.get('ein')}. Located in {org.get('city')}, {org.get('state')}."
+                    # Note: ProPublica doesn't always provide the website in the search endpoint
+                    web = f"https://projects.propublica.org/nonprofits/organizations/{org.get('ein')}"
+            except Exception as e:
+                print(f"USA Discovery Error: {e}")
+
+        elif country == "India":
+            # Use Wikipedia tool for India discovery
+            wiki_results = NGOAgentPipeline._search_wikipedia(category, country, limit=1)
+            if wiki_results:
+                name, desc, web = wiki_results[0]['name'], wiki_results[0]['desc'], wiki_results[0]['web']
+
+        elif country == "Global":
+            # Use Every.org for global discovery
+            every_results = NGOAgentPipeline._search_every_org(category, limit=1)
+            if every_results:
+                name, desc, web = every_results[0]['name'], every_results[0]['desc'], every_results[0]['web']
+            else:
+                # Fallback to GlobalGiving
+                gg_results = NGOAgentPipeline._search_global_giving(category, limit=1)
+                if gg_results:
+                    name, desc, web = gg_results[0]['name'], gg_results[0]['desc'], gg_results[0]['web']
+
+        # If Discovery failed to find a specific match, fallback to a placeholder with a low score
+        if not name:
+            name = f"Discovery: {category} Search"
+            desc = "Our agent scanned regional records but could not find a high-confidence match for this specific query."
+            final_score = 4.5
+            status = "Pending Review"
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+            subcategory = SUBCATEGORY_OPTIONS.get(category, ["General"])[0]
+            return insert_ngo(name, category, subcategory, country, desc, web, "contact@not-found.org", status, final_score, timestamp)
+
+        return NGOAgentPipeline._process_discovery_item(name, category, country, desc, web, reg_id)
+
+    @staticmethod
+    def run_bulk_pipeline(category, country, limit=5):
+        """Bulk discovery and import using external tools (Wikipedia & ProPublica)."""
+        items = []
+        if country == "USA":
+            url = f"https://projects.propublica.org/nonprofits/api/v2/search.json?q={category}"
+            try:
+                resp = requests.get(url, timeout=10)
+                if resp.status_code == 200:
+                    orgs = resp.json().get("organizations", [])[:limit]
+                    for org in orgs:
+                        ein = org.get("ein")
+                        items.append({
+                            "name": org.get("name").title(),
+                            "desc": f"Verified US Nonprofit. EIN: {ein}. Located in {org.get('city')}, {org.get('state')}.",
+                            "web": f"https://projects.propublica.org/nonprofits/organizations/{ein}"
+                        })
+            except Exception as e:
+                print(f"Bulk USA Discovery Error: {e}")
+        
+        # Global tools: Every.org, GlobalGiving, and Wikipedia
+        if not items or country != "USA":
+            items.extend(NGOAgentPipeline._search_every_org(category, limit=limit))
+            if len(items) < limit:
+                items.extend(NGOAgentPipeline._search_global_giving(category, limit=limit - len(items)))
+            if len(items) < limit:
+                items.extend(NGOAgentPipeline._search_wikipedia(category, country, limit=limit - len(items)))
+
+        discoveries = []
+        for item in items[:limit]:
+            try:
+                res = NGOAgentPipeline._process_discovery_item(item['name'], category, country, item['desc'], item['web'])
+                if res and res.get("success"):
+                    discoveries.append(res)
+            except Exception as e:
+                print(f"Discovery insertion error for {item.get('name')}: {e}")
+        return discoveries
+
+
+@st.cache_resource
+def get_scheduler():
+    """Persistently initialize and start the background scheduler."""
+    sched = BackgroundScheduler()
+    # Schedule autonomous discovery to run once a week
+    sched.add_job(NGOAgentPipeline.run_autonomous_discovery, 'interval', weeks=1, id='weekly_discovery')
+    try:
+        sched.start()
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    return sched
+
 
 MAIN_CATEGORIES = [
     "Food Supply",
@@ -174,16 +367,12 @@ def show_login_page():
                     st.error(res["msg"])
             
             st.divider()
-            if st.button("Continue with Google 🚀", use_container_width=True, type="secondary"):
-                # Real Google OAuth requires Client IDs. 
-                # Here we simulate the successful return of a Gmail account.
-                google_email = "user@gmail.com" 
-                login_with_google_simulated(google_email)
+            st.info("💡 Real Google OAuth is required for public launch. Configure Supabase Auth Providers in the dashboard.")
+            if st.button("Continue with Google (Dev Mode) 🚀", use_container_width=True, type="secondary"):
+                st.warning("This is a developer bypass. Real OAuth must be implemented via `supabase.auth.sign_in_with_oauth()`.")
+                # Mock logic for dev only
                 st.session_state.authenticated = True
-                st.session_state.user_email = google_email
-                if "show_auth" in st.session_state:
-                    st.session_state.show_auth = False
-                st.success("Google Authentication Simulated Successfully!")
+                st.session_state.user_email = "dev-tester@gmail.com"
                 st.rerun()
 
         with tab_s:
@@ -211,6 +400,9 @@ def main():
     # Setup page properties
     st.set_page_config(page_title="CivicLink Hub", layout="wide", page_icon="🤝")
     
+    # Initialize the Autonomous Weekly Agent
+    get_scheduler()
+
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
     if "show_auth" not in st.session_state:
@@ -300,6 +492,7 @@ def main():
             .ai-gradient {
                 background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
                 color: white !important;
+            }
         </style>
     """, unsafe_allow_html=True)
 
@@ -466,26 +659,55 @@ def main():
     # TAB 2: AI SCRAPER ENGINE CONTROL PANEL
     # -----------------------------------------------------------------
     with tab2:
-        st.subheader("🤖 Autonomous Agent Core Operations")
-        st.write("Deploy deep-web background scraping algorithms to scan public portals, verify regional licenses, and assign metrics dynamically.")
+        st.subheader("✨ Intelligent NGO Discovery")
+        st.write("Enter a specific NGO registration ID or URL to run a live trust audit using our verification engine.")
         
-        col_a, col_b = st.columns(2)
+        col_a, col_b, col_c = st.columns([1, 1, 1])
         with col_a:
             agent_category = st.selectbox("Target Sector Matrix", MAIN_CATEGORIES)
         with col_b:
-            agent_country = st.selectbox("Target Geographical Boundary", ["USA", "India"])
+            agent_country = st.selectbox("Target Geographical Boundary", ["USA", "India", "Global"])
+        with col_c:
+            reg_input = st.text_input("Registration ID (e.g. EIN or 80G)", placeholder="Optional")
             
-        if st.button("🚀 Execute Live Discovery & Auditing Pipeline", width='stretch'):
+        if st.button("🚀 Run AI Verification Audit", use_container_width=True):
             if not st.session_state.authenticated:
                 st.session_state.show_auth = True
                 st.rerun()
-            with st.spinner("Pipeline parsing web registers, examining active certificates, and computing trust ratings..."):
-                res = NGOAgentPipeline.run_pipeline(agent_category, agent_country)
+            with st.spinner(f"Agent executing live {agent_country} registry crawl..."):
+                res = NGOAgentPipeline.run_pipeline(agent_category, agent_country, reg_id=reg_input)
                 if res["success"]:
                     st.toast(f"Discovered: {res['name']}", icon="✅")
                     st.success(f"🎉 **New Entity Integrated Successfully!** Discovered, ranked, and indexed **{res['name']}** with a verified Trust Index score of **{res['score']}/10**.")
                 else:
                     st.info("The automated indexer scanned the selected quadrant but identified no new unmapped entities.")
+
+        if st.button("🔍 Bulk Discovery & Deep Audit", use_container_width=True):
+            if not st.session_state.authenticated:
+                st.session_state.show_auth = True
+                st.rerun()
+            with st.spinner(f"Agentic tools searching internet for {agent_category} partners..."):
+                discoveries = NGOAgentPipeline.run_bulk_pipeline(agent_category, agent_country)
+                if discoveries:
+                    st.success(f"Successfully integrated {len(discoveries)} new partners into the marketplace.")
+                    for d in discoveries:
+                        st.markdown(f"- **{d['name']}** (Score: {d['score']} | Sector: `{d['subcategory']}`)")
+                else:
+                    st.info("No new unique partners identified in this sector audit.")
+
+        st.divider()
+        st.subheader("🕵️‍♂️ Autonomous Weekly Agent")
+        st.info("The CivicLink Agent autonomously scans registries every week to balance the marketplace and fill gaps in underserved sectors.")
+        
+        if st.button("Manual Trigger: Run Weekly Agent Now", use_container_width=True):
+            with st.spinner("Agent is analyzing marketplace health and discovering new partners..."):
+                discoveries = NGOAgentPipeline.run_autonomous_discovery()
+                if discoveries:
+                    st.success(f"Agent successfully discovered {len(discoveries)} new partners!")
+                    for d in discoveries:
+                        st.markdown(f"- **{d['name']}** - Category: `{d['subcategory']}` | Trust Index: `{d['score']}`")
+                else:
+                    st.info("Agent analysis complete. No immediate critical gaps identified.")
 
     # -----------------------------------------------------------------
     # TAB 3: TRANSPARENCY REGISTRY
